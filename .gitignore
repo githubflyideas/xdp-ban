@@ -1,0 +1,23 @@
+# 构建产物
+/xdp-ban
+*.exe
+*.db
+*.db-journal
+*.db-wal
+
+# 依赖
+/vendor/
+
+# 设计/内部文档(不进公开仓库,不暴露设计思路与关键解析)
+/design/
+/internal-docs/
+PROGRESS*.md
+*_DESIGN.md
+API_CONTRACT*.md
+TRANSPORT*.md
+TESTING.md
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/

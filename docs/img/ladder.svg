@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="440" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="760" height="440" fill="#eef1f5"/>
+<rect width="760" height="40" fill="#0f1b2d"/><text x="16" y="26" font-size="14" font-weight="700" fill="#fff">XDP<tspan fill="#d9411e">-ban</tspan></text>
+<text x="30" y="80" font-size="18" font-weight="600" fill="#1a2433">阶梯封禁 · Escalating Ban</text>
+<text x="30" y="102" font-size="12" fill="#67748a">攻击者持续尝试 → 封禁时间阶梯式升级,不再一解封就被接着打</text>
+<g transform="translate(40,130)">
+<!-- ladder steps -->
+<g font-size="12">
+<rect x="0" y="0" width="150" height="46" rx="4" fill="#fff" stroke="#d5dae3"/><text x="12" y="20" fill="#1a2433" font-weight="600">L1 · 10 分钟</text><text x="12" y="38" fill="#67748a" font-size="10">首次</text>
+<rect x="0" y="56" width="200" height="46" rx="4" fill="#fff" stroke="#d5dae3"/><text x="12" y="76" fill="#1a2433" font-weight="600">L2 · 1 小时</text><text x="12" y="94" fill="#d98a1e" font-size="10">观察期内再犯 ↑</text>
+<rect x="0" y="112" width="250" height="46" rx="4" fill="#fff" stroke="#d5dae3"/><text x="12" y="132" fill="#1a2433" font-weight="600">L3 · 1 天</text><text x="12" y="150" fill="#d98a1e" font-size="10">继续攻击 ↑</text>
+<rect x="0" y="168" width="300" height="46" rx="4" fill="#fff" stroke="#d5dae3"/><text x="12" y="188" fill="#1a2433" font-weight="600">L4 · 7 天</text><text x="12" y="206" fill="#d98a1e" font-size="10">继续攻击 ↑</text>
+<rect x="0" y="224" width="350" height="46" rx="4" fill="#2b1414" stroke="#cf2f2f"/><text x="12" y="244" fill="#ff6b5b" font-weight="600">L5 · 永久(彻底黑名单)</text><text x="12" y="262" fill="#cf9b96" font-size="10">屡教不改</text>
+</g>
+<g transform="translate(430,20)"><rect width="270" height="250" rx="4" fill="#fff" stroke="#d5dae3"/><rect width="270" height="32" rx="4" fill="#f7f9fc"/><text x="14" y="21" font-size="12" font-weight="600" fill="#1a2433">45.148.10.2 · 当前状态</text>
+<text x="14" y="60" font-size="12" fill="#67748a">当前级别</text><text x="256" y="60" text-anchor="end" font-size="12" fill="#cf2f2f" font-weight="600">L4 · 7 天</text>
+<text x="14" y="88" font-size="12" fill="#67748a">累计犯次</text><text x="256" y="88" text-anchor="end" font-size="12" fill="#1a2433">6</text>
+<text x="14" y="116" font-size="12" fill="#67748a">观察期</text><text x="256" y="116" text-anchor="end" font-size="12" fill="#d98a1e">进行中</text>
+<text x="14" y="144" font-size="12" fill="#67748a">实时信号(还在打?)</text><text x="256" y="144" text-anchor="end" font-size="12" fill="#cf2f2f">+312 pkts ↑</text>
+<line x1="14" y1="164" x2="256" y2="164" stroke="#eceff4"/>
+<text x="14" y="190" font-size="11" fill="#67748a">下一次再犯将升至</text><text x="256" y="190" text-anchor="end" font-size="12" fill="#cf2f2f" font-weight="600">L5 永久</text>
+<rect x="14" y="208" width="110" height="28" rx="3" fill="#fff" stroke="#c3ccd9"/><text x="69" y="227" text-anchor="middle" font-size="11" fill="#1a2433">手动降级</text>
+<rect x="132" y="208" width="124" height="28" rx="3" fill="#d9411e"/><text x="194" y="227" text-anchor="middle" font-size="11" fill="#fff">直接永久封禁</text></g>
+</g></svg>
