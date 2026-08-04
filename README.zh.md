@@ -76,6 +76,21 @@ sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 
 全部版本:https://github.com/githubflyideas/xdp-ban/releases
 
+## 流量分析(ElastiFlow)
+
+采样器可在向 xdp-ban 上报的同时,把采样流量以 **NetFlow v5** 导出到 ElastiFlow
+做可视化分析。加 `-netflow <collector>:2055` 即可:
+
+```bash
+sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples \
+     -n 100 -key <API_KEY> -netflow 127.0.0.1:2055
+```
+
+[`deploy/elastiflow/`](deploy/elastiflow/) 下有一键 compose(Elasticsearch + Kibana
++ ElastiFlow)——`docker compose up -d` 后让采样器指向 `udp/2055` 即可。采样率会写进
+每个报文,ElastiFlow 据此自动还原真实流量。为什么选 NetFlow v5 而非 IPFIX,见
+[deploy/elastiflow/README.md](deploy/elastiflow/README.md)。
+
 ## 范围封禁(按国家 / AS)
 
 ```bash

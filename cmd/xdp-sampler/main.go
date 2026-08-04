@@ -54,6 +54,16 @@ type FlowSample struct {
 	PktCount  int64  `json:"pkt_count"`
 	ByteCount int64  `json:"byte_count"`
 	LastSeen  int64  `json:"last_seen_unix"`
+
+	// 以下为数值型原始字段,仅供 NetFlow v5 二进制编码使用,不进 JSON。
+	// 保留在这里避免为 NetFlow 单独维护第二张聚合表。
+	rawSrcIP    uint32 // 网络字节序
+	rawDstIP    uint32
+	rawSrcPort  uint16
+	rawDstPort  uint16
+	rawProto    uint8
+	firstUptime uint32 // 流首包相对采样器启动的毫秒
+	lastUptime  uint32
 }
 
 // ReportPayload 上报载荷
@@ -72,6 +82,10 @@ var (
 	currentRateMap *ebpf.Map
 	currentRate    = 100
 )
+
+// bootTime 采样器启动时刻。NetFlow v5 的 first/last 是相对启动的毫秒数,
+// 需要一个进程级基准。
+var bootTime = time.Now()
 
 // samplingRate 返回当前采样率 N(1/N)
 func samplingRate() int {
@@ -102,10 +116,22 @@ func main() {
 	reportInterval := flag.Duration("interval", 10*time.Second, "上报间隔")
 	httpPort := flag.String("p", ":9090", "HTTP API 监听端口")
 	key := flag.String("key", "changeme", "上报到 xdp-ban 时使用的 API Key")
+	netflowAddr := flag.String("netflow", "", "NetFlow v5 collector 地址(host:port,如 elastiflow:2055);为空则不导出")
 	flag.Parse()
 	apiKey = *key
 
 	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d, http_port=%s\n", *device, *samplingN, *httpPort)
+
+	// NetFlow v5 导出器(可选)。启动即建 UDP 目的地绑定,失败快速退出 ——
+	// 配了 collector 却连不上,应该让用户立刻知道,而不是静默不发。
+	nfExporter, err := newNetflowExporter(*netflowAddr)
+	if err != nil {
+		log.Fatalf("初始化 NetFlow 导出器 (%s): %v", *netflowAddr, err)
+	}
+	defer nfExporter.Close()
+	if nfExporter.enabled {
+		log.Printf("✓ NetFlow v5 导出已启用 → %s(采样率 1/%d 会写入报文供 collector 还原)", *netflowAddr, *samplingN)
+	}
 
 	// 1. 加载嵌入的 eBPF bytecode
 	if len(xdpSamplerBytecode) == 0 {
@@ -193,7 +219,11 @@ func main() {
 		case <-ticker.C:
 			// 上报周期到
 			if len(flowStats) > 0 {
-				reportSamples(*xdpbanURL, *device, samplingRate(), flowStats)
+				n := samplingRate()
+				reportSamples(*xdpbanURL, *device, n, flowStats)
+				// 同一批聚合结果同时喂给 NetFlow collector(ElastiFlow)。
+				// 复用同一张表,不为 NetFlow 单独再聚合一遍。
+				nfExporter.export(toNetflowFlows(flowStats), n)
 				flowStats = make(map[string]*FlowSample) // 清空
 			}
 
@@ -207,6 +237,7 @@ func main() {
 			dstPort := ntohs(evt.DstPort)
 			srcIP := ipToString(evt.SrcIP)
 			dstIP := ipToString(evt.DstIP)
+			nowMs := uint32(time.Since(bootTime).Milliseconds())
 
 			// 聚合流统计
 			key := fmt.Sprintf("%s:%d-%s:%d/%s", srcIP, srcPort, dstIP, dstPort, protoToString(evt.Proto))
@@ -215,6 +246,7 @@ func main() {
 				fs.PktCount++
 				fs.ByteCount += int64(evt.PktLen)
 				fs.LastSeen = time.Now().Unix()
+				fs.lastUptime = nowMs
 			} else {
 				flowStats[key] = &FlowSample{
 					SrcIP:     srcIP,
@@ -225,10 +257,48 @@ func main() {
 					PktCount:  1,
 					ByteCount: int64(evt.PktLen),
 					LastSeen:  time.Now().Unix(),
+
+					rawSrcIP:    evt.SrcIP,
+					rawDstIP:    evt.DstIP,
+					rawSrcPort:  srcPort,
+					rawDstPort:  dstPort,
+					rawProto:    evt.Proto,
+					firstUptime: nowMs,
+					lastUptime:  nowMs,
 				}
 			}
 		}
 	}
+}
+
+// toNetflowFlows 把聚合表转成 NetFlow v5 记录。
+// 32 位计数器溢出用饱和处理:采样统计不做精确计费,封顶比回绕更符合直觉。
+func toNetflowFlows(flows map[string]*FlowSample) []nfFlow {
+	out := make([]nfFlow, 0, len(flows))
+	for _, fs := range flows {
+		out = append(out, nfFlow{
+			srcIP:   fs.rawSrcIP,
+			dstIP:   fs.rawDstIP,
+			srcPort: fs.rawSrcPort,
+			dstPort: fs.rawDstPort,
+			proto:   fs.rawProto,
+			pkts:    sat32(fs.PktCount),
+			bytes:   sat32(fs.ByteCount),
+			first:   fs.firstUptime,
+			last:    fs.lastUptime,
+		})
+	}
+	return out
+}
+
+func sat32(v int64) uint32 {
+	if v < 0 {
+		return 0
+	}
+	if v > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(v)
 }
 
 // handleSamplingRate HTTP API: 修改采样率

@@ -76,6 +76,23 @@ sudo ./xdp-agent   -server http://<control>:8080 -key <API_KEY>
 
 All releases: https://github.com/githubflyideas/xdp-ban/releases
 
+## Traffic analysis (ElastiFlow)
+
+The sampler can export sampled flows as **NetFlow v5** to ElastiFlow for
+visualization, alongside its report to xdp-ban. Add `-netflow <collector>:2055`:
+
+```bash
+sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples \
+     -n 100 -key <API_KEY> -netflow 127.0.0.1:2055
+```
+
+A ready-to-run stack (Elasticsearch + Kibana + ElastiFlow) lives in
+[`deploy/elastiflow/`](deploy/elastiflow/) — `docker compose up -d`, then point
+the sampler at `udp/2055`. The sampling rate is written into every packet so
+ElastiFlow restores true traffic volume automatically. See
+[deploy/elastiflow/README.md](deploy/elastiflow/README.md) for why NetFlow v5
+and not IPFIX.
+
 ## Scoped bans (country / ASN)
 
 ```bash

@@ -1,0 +1,117 @@
+# ElastiFlow 流量分析栈 —— 一键接入 xdp-sampler 的 NetFlow v5 导出。
+#
+# 组成:Elasticsearch(存储)+ Kibana(可视化)+ ElastiFlow flow-collector(收 NetFlow)。
+# 单机 all-in-one,面向评估与中小规模;生产大流量应把 ES 拆成独立集群。
+#
+# 启动:  docker compose up -d
+# 停止:  docker compose down          (数据保留在具名卷)
+# 清空:  docker compose down -v       (连数据一起删)
+#
+# 就绪后:
+#   Kibana       http://localhost:5601
+#   NetFlow 入口 udp/2055  ← xdp-sampler -netflow <本机IP>:2055
+#
+# 版本固定而非 latest:latest 会在某次 pull 后突然行为不同,
+# 排障时无法复现。升级应是一次显式的、可回滚的改动。
+
+name: xdpban-elastiflow
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: ef-elasticsearch
+    environment:
+      # 单节点模式:评估场景不需要集群,省掉选主与分片复制的复杂度
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      # 关掉安全:本地评估栈,ES 只在 compose 内网暴露,不对外。
+      # 生产务必打开 xpack.security 并设密码。
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      # 堆内存:ElastiFlow 官方建议 ES 堆不超过物理内存一半。
+      # 2g 适合评估;流量大需调高并相应加大容器内存上限。
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - cluster.name=xdpban-ef
+    ulimits:
+      # memlock 必须解锁,否则 bootstrap.memory_lock=true 会启动失败 ——
+      # 这是 ES 在容器里最常见的启动错误。
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"   # 仅绑本机,不对外暴露 ES
+    healthcheck:
+      # collector 与 Kibana 都依赖 ES 就绪,用健康检查串起启动顺序,
+      # 避免它们在 ES 还没起来时疯狂重连刷日志。
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    container_name: ef-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_HOST=0.0.0.0
+    ports:
+      - "5601:5601"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  flow-collector:
+    image: elastiflow/flow-collector:6.4.2
+    container_name: ef-flow-collector
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      # NetFlow v5/v9 与 IPFIX 都走这个端口;我们只发 v5。
+      # UDP 必须显式声明协议,否则默认 TCP 收不到。
+      - "2055:2055/udp"
+    environment:
+      # --- 输入:NetFlow ---
+      EF_FLOW_SERVER_UDP_IP: "0.0.0.0"
+      EF_FLOW_SERVER_UDP_PORT: "2055"
+      EF_PROCESSOR_DECODE_IPFIX_ENABLE: "true"
+      EF_PROCESSOR_DECODE_NETFLOW9_ENABLE: "true"
+      EF_PROCESSOR_DECODE_NETFLOW5_ENABLE: "true"
+
+      # --- 采样还原 ---
+      # 让 collector 信任报文里的 sampling_interval 字段。
+      # xdp-sampler 已把 1/N 写进每个 v5 包,collector 据此把计数 ×N。
+      # 关掉的话看到的是采样后的原始计数,流量会被严重低估。
+      EF_PROCESSOR_DECODE_NETFLOW_SAMPLING_TRUST: "true"
+
+      # --- 输出:Elasticsearch ---
+      EF_OUTPUT_ELASTICSEARCH_ENABLE: "true"
+      EF_OUTPUT_ELASTICSEARCH_ECS_ENABLE: "true"
+      EF_OUTPUT_ELASTICSEARCH_ADDRESSES: "elasticsearch:9200"
+      EF_OUTPUT_ELASTICSEARCH_INDEX_PERIOD: "daily"
+
+      # --- 富化:GeoIP / ASN ---
+      # ElastiFlow 内置 MaxMind 库做源地址的国家/AS 归属 ——
+      # 这与本项目"按国家/AS 封禁"看的是同一维度,便于对照决策。
+      EF_PROCESSOR_ENRICH_IPADDR_MAXMIND_ASN_ENABLE: "true"
+      EF_PROCESSOR_ENRICH_IPADDR_MAXMIND_GEOIP_ENABLE: "true"
+
+      # 许可:6.x 免费版有流速上限(约 4000 flows/s),评估足够。
+      EF_LICENSE_ACCEPTED: "true"
+    restart: unless-stopped
+
+volumes:
+  es-data:
+    driver: local
