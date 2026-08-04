@@ -53,17 +53,28 @@ Sampling is **out-of-band**: it observes a copy of the traffic and always return
 Download the binary and run it. No dependencies, no build step — the eBPF objects are already inside.
 
 ```bash
+# x86_64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-ban-linux-amd64
+# arm64: replace amd64 with arm64 in the URL above
+
+chmod +x xdp-ban
 ./xdp-ban    # http://localhost:8080  (default admin / admin12345 — change it)
 ```
 
 Data lives in a single `xdpban.db` file. Back up = copy the file.
 
-Data plane (root, on the hosts doing the work):
+Data plane (root, on the hosts doing the work) — same download pattern for `xdp-sampler` and `xdp-agent`:
 
 ```bash
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-agent-linux-amd64
+chmod +x xdp-sampler xdp-agent
+
 sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples -n 100 -key <API_KEY>
 sudo ./xdp-agent   -server http://<control>:8080 -key <API_KEY>
 ```
+
+All releases: https://github.com/githubflyideas/xdp-ban/releases
 
 ## Scoped bans (country / ASN)
 

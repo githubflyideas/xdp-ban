@@ -53,17 +53,28 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 下载二进制,直接运行。无依赖、无需编译 —— eBPF 目标文件已经嵌在里面。
 
 ```bash
+# x86_64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-ban-linux-amd64
+# arm64:把上面 URL 里的 amd64 换成 arm64
+
+chmod +x xdp-ban
 ./xdp-ban    # http://localhost:8080  (默认 admin / admin12345,请立即修改)
 ```
 
 数据存于单个 `xdpban.db` 文件,备份就是拷贝这个文件。
 
-数据面(在实际干活的主机上,需 root):
+数据面(在实际干活的主机上,需 root)—— `xdp-sampler` 和 `xdp-agent` 同样方式下载:
 
 ```bash
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-agent-linux-amd64
+chmod +x xdp-sampler xdp-agent
+
 sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 100 -key <API_KEY>
 sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 ```
+
+全部版本:https://github.com/githubflyideas/xdp-ban/releases
 
 ## 范围封禁(按国家 / AS)
 
