@@ -12,7 +12,7 @@ SAMPLER_N=${SAMPLER_N:-100}             # 采样率 1/N
 AGENT_INTERVAL=${AGENT_INTERVAL:-5s}
 
 echo "=========================================="
-echo "xdp-ban 部署脚本"
+echo "xdp-ban 部署脚本 (纯 XDP 执行,无 nftables)"
 echo "=========================================="
 echo ""
 echo "配置:"
@@ -39,7 +39,6 @@ check_cmd() {
 echo "检查依赖..."
 check_cmd clang
 check_cmd llvm-objcopy
-check_cmd nftables
 check_cmd ip
 echo "✓ 依赖检查通过"
 echo ""
@@ -47,15 +46,6 @@ echo ""
 # 编译 eBPF
 echo "编译 eBPF 程序..."
 bash build_xdp.sh
-echo ""
-
-# 初始化 nftables
-echo "初始化 nftables..."
-nft add table ip filter 2>/dev/null || true
-nft add chain ip filter input { type filter hook input priority 0\; policy accept\; } 2>/dev/null || true
-nft add set ip filter blacklist { type ipv4_addr\; flags dynamic\; } 2>/dev/null || true
-nft add rule ip filter input ip daddr @blacklist drop 2>/dev/null || true
-echo "✓ nftables 就绪"
 echo ""
 
 # 挂载采样 XDP
@@ -78,12 +68,12 @@ echo "创建 systemd 服务..."
 # xdp-agent.service
 cat > /etc/systemd/system/xdp-agent.service << EOF
 [Unit]
-Description=xdp-ban Agent - Dispatch Executor
+Description=xdp-ban Agent - XDP Filter (eBPF)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xdp-agent -server $XDPBAN_SERVER -key $XDPBAN_API_KEY -interval $AGENT_INTERVAL
+ExecStart=/usr/local/bin/xdp-agent -server $XDPBAN_SERVER -key $XDPBAN_API_KEY -prog ./cmd/xdp-agent/obj/xdp_filter.o -interval $AGENT_INTERVAL
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -96,7 +86,7 @@ EOF
 # xdp-sampler.service
 cat > /etc/systemd/system/xdp-sampler.service << EOF
 [Unit]
-Description=xdp-ban Sampler - Traffic Monitor
+Description=xdp-ban Sampler - Traffic Monitor (eBPF)
 After=network.target
 
 [Service]
@@ -133,9 +123,15 @@ echo "后续步骤:"
 echo "  1. 启动 agent:  systemctl start xdp-agent"
 echo "  2. 启动 sampler: systemctl start xdp-sampler"
 echo "  3. 查看日志:    journalctl -u xdp-agent -f"
-echo "  4. 检查黑名单:  nft list set ip filter blacklist"
+echo ""
+echo "运行时调参:"
+echo "  # 修改采样率为 1/50"
+echo "  bpftool map update name sampling_rate key 0 0 0 0 value 50 0 0 0"
+echo ""
+echo "查看黑名单(eBPF map):"
+echo "  bpftool map dump name ban_list"
 echo ""
 echo "验证部署:"
 echo "  curl http://localhost:8080/api/v1/dispatch/pending"
-echo "  bpftool map dump name sampling_rate"
 echo ""
+

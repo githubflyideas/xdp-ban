@@ -1,9 +1,11 @@
-/* xdp_filter.c — XDP 执行层(nftables 后端)
+/* xdp_filter.c — XDP 执行层(纯 eBPF 实现)
  *
  * 职责:
  * - 存储 BPF map: IP 黑名单(5元组或单IP)
  * - XDP 快速路径检查:黑名单中的包直接 DROP
- * - 白名单、优先级覆盖通过 nftables 反馈
+ * - NO nftables/iptables — 直接在 XDP 执行
+ *
+ * 下发方式: bpftool map update ban_list key ... value ...
  *
  * 编译:
  *   clang -O2 -c -target bpf xdp_filter.c -o xdp_filter.o
@@ -15,21 +17,26 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <bpf/bpf_helpers.h>
-#include <arpa/inet.h>
 
 #define MAX_BANNED_IPS 10000
 
+/* 黑名单条目 */
 struct ban_entry {
     __u32 dst_ip;      /* 目标 IP */
     __u16 dst_port;    /* 目标端口(0 = 任意) */
     __u8 proto;        /* IPPROTO_TCP/UDP(0 = 任意) */
-    __u8 action;       /* 0=DROP, 1=PASS */
+    __u8 _pad;
+};
+
+struct ban_value {
+    __u64 expires_at;  /* 0 = 永久, unix ns */
+    __u32 hits;        /* 丢弃包数 */
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct ban_entry);
-    __type(value, __u64);  /* 计数 */
+    __type(value, struct ban_value);
     __uint(max_entries, MAX_BANNED_IPS);
 } ban_list SEC(".maps");
 
@@ -45,6 +52,7 @@ int xdp_filter(struct xdp_md *ctx)
 {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
+    __u64 now = bpf_ktime_get_ns();
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
@@ -77,9 +85,13 @@ int xdp_filter(struct xdp_md *ctx)
     }
 
     /* 查黑名单 */
-    __u64 *action_ptr = bpf_map_lookup_elem(&ban_list, &entry);
-    if (!action_ptr)
+    struct ban_value *ban_ptr = bpf_map_lookup_elem(&ban_list, &entry);
+    if (!ban_ptr)
         return XDP_PASS;  /* 不在黑名单 */
+
+    /* 检查 TTL(如果非 0) */
+    if (ban_ptr->expires_at > 0 && now > ban_ptr->expires_at)
+        return XDP_PASS;  /* 已过期,放行 */
 
     /* 黑名单命中:DROP + 计数 */
     __u32 drop_idx = 0;
@@ -87,7 +99,11 @@ int xdp_filter(struct xdp_md *ctx)
     if (drop_counter)
         __sync_fetch_and_add(drop_counter, 1);
 
+    /* 更新命中计数 */
+    __sync_fetch_and_add(&ban_ptr->hits, 1);
+
     return XDP_DROP;
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
+

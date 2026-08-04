@@ -1,9 +1,11 @@
-// Package main — xdp-agent: 执行器
+// Package main — xdp-agent: 纯 Go 单二进制
 //
 // 职责:
 // 1. 轮询 xdp-ban 服务器 GET /api/v1/dispatch/pending
-// 2. 执行 dispatch 指令(直接操作 eBPF map,NO nftables)
+// 2. 执行 dispatch 指令(直接操作嵌入的 eBPF map,NO nftables)
 // 3. 反馈执行状态 POST /api/v1/dispatch/:id/ack 或 /fail
+//
+// 部署: 拷贝单个二进制即可运行(需 root)
 package main
 
 import (
@@ -19,7 +21,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// Dispatch 下发指令(从 xdp-ban 服务器)
+// Dispatch 下发指令
 type Dispatch struct {
 	ID           uint   `json:"id"`
 	BanRequestID uint   `json:"ban_request_id"`
@@ -29,14 +31,14 @@ type Dispatch struct {
 	State        string `json:"state"`
 }
 
-// BanPayload 解析的指令内容
+// BanPayload 指令内容
 type BanPayload struct {
 	Target   string `json:"target"`
 	TTLSecs  int64  `json:"ttl_secs"`
 	NodeID   string `json:"node_id"`
 	ReqID    uint   `json:"req_id"`
 	BanID    string `json:"ban_id"`
-	Backend  string `json:"backend"`  // 现在忽略,总是用 XDP
+	Backend  string `json:"backend"`
 	Reason   string `json:"reason"`
 }
 
@@ -50,36 +52,33 @@ type BanEntry struct {
 
 // BanValue 对应 xdp_filter.c 的 ban_value
 type BanValue struct {
-	ExpiresAt uint64  // 0 = 永久
+	ExpiresAt uint64
 	Hits      uint32
 }
 
 type Config struct {
-	ServerURL    string
-	APIKey       string
-	Interval     time.Duration
-	XDPProgPath  string
+	ServerURL string
+	APIKey    string
+	Interval  time.Duration
 }
 
 func main() {
 	serverURL := flag.String("server", "http://localhost:8080", "xdp-ban 服务器地址")
 	apiKey := flag.String("key", "changeme", "API Key")
 	interval := flag.Duration("interval", 5*time.Second, "轮询间隔")
-	xdpProg := flag.String("prog", "./cmd/xdp-agent/obj/xdp_filter.o", "XDP prog 路径")
 	flag.Parse()
 
 	cfg := Config{
-		ServerURL:   *serverURL,
-		APIKey:      *apiKey,
-		Interval:    *interval,
-		XDPProgPath: *xdpProg,
+		ServerURL: *serverURL,
+		APIKey:    *apiKey,
+		Interval:  *interval,
 	}
 
-	log.Printf("xdp-agent 启动: server=%s, interval=%v\n", cfg.ServerURL, cfg.Interval)
-	log.Printf("XDP 执行层(纯 eBPF,无 nftables)\n")
+	log.Printf("XDP 执行器启动(纯 Go 单二进制): server=%s\n", cfg.ServerURL)
 
-	// 加载 eBPF 程序
-	spec, err := ebpf.LoadCollectionSpec(cfg.XDPProgPath)
+	// 1. 加载嵌入的 eBPF bytecode
+	reader := bytes.NewReader(xdpFilterBytecode)
+	spec, err := ebpf.LoadCollectionSpec(reader)
 	if err != nil {
 		log.Fatalf("load ebpf spec: %v", err)
 	}
@@ -95,7 +94,7 @@ func main() {
 		log.Fatalf("ban_list map not found")
 	}
 
-	log.Printf("✓ eBPF 黑名单 map 已加载(容量 10000)\n")
+	log.Printf("✓ eBPF 黑名单 map 已加载(纯 XDP 执行)\n")
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
@@ -166,13 +165,9 @@ func fetchPending(cfg *Config) ([]Dispatch, error) {
 	return dispatches, nil
 }
 
-// executeXDP 直接写 eBPF map,在 XDP 阶段执行
+// executeXDP 直接写 eBPF map
 func executeXDP(banListMap *ebpf.Map, payload *BanPayload) error {
 	// 解析目标 IP
-	// 简化:只支持单 IP(不支持 CIDR)
-	// 生产需要 net.ParseCIDR() 处理 CIDR
-
-	// 示例: 203.0.113.7
 	parts := parseIP(payload.Target)
 	if parts == nil {
 		return fmt.Errorf("invalid target: %s", payload.Target)
@@ -182,8 +177,8 @@ func executeXDP(banListMap *ebpf.Map, payload *BanPayload) error {
 
 	entry := BanEntry{
 		DstIP:   dstIP,
-		DstPort: 0,  // 任意端口
-		Proto:   0,  // 任意协议
+		DstPort: 0,
+		Proto:   0,
 	}
 
 	expiresAt := uint64(0)
@@ -212,7 +207,6 @@ func executeXDP(banListMap *ebpf.Map, payload *BanPayload) error {
 }
 
 func parseIP(s string) [4]byte {
-	// 简单解析 "203.0.113.7" → [203, 0, 113, 7]
 	parts := [4]byte{}
 	_, _ = fmt.Sscanf(s, "%d.%d.%d.%d", &parts[0], &parts[1], &parts[2], &parts[3])
 	return parts
@@ -245,4 +239,3 @@ func markFailed(cfg *Config, dispatchID uint, errMsg string) {
 		resp.Body.Close()
 	}
 }
-

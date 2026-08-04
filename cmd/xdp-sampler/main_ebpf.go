@@ -1,9 +1,11 @@
-// Package sampler — XDP 采样上报到 xdp-ban 服务器
+// Package main — xdp-sampler: 纯 Go 单二进制
 //
 // 职责:
-// 1. 加载 XDP prog 到采样网卡
+// 1. 加载嵌入的 eBPF bytecode 到采样网卡
 // 2. 管理采样率(用户态可修改 BPF map)
 // 3. 读 ringbuf 事件 → 聚合 → 上报
+//
+// 部署: 拷贝单个二进制即可运行(需 root)
 package main
 
 import (
@@ -21,7 +23,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 )
 
-// SampleEvent 采样事件(对应 xdp_sampler.c 的 sample_event)
+// SampleEvent 采样事件
 type SampleEvent struct {
 	Ts      uint64
 	SrcIP   uint32
@@ -37,37 +39,37 @@ type SampleEvent struct {
 
 // FlowSample 上报数据
 type FlowSample struct {
-	SrcIP      string `json:"src_ip"`
-	DstIP      string `json:"dst_ip"`
-	SrcPort    int    `json:"src_port"`
-	DstPort    int    `json:"dst_port"`
-	Proto      string `json:"proto"`
-	PktCount   int64  `json:"pkt_count"`
-	ByteCount  int64  `json:"byte_count"`
-	LastSeen   int64  `json:"last_seen_unix"`
+	SrcIP     string `json:"src_ip"`
+	DstIP     string `json:"dst_ip"`
+	SrcPort   int    `json:"src_port"`
+	DstPort   int    `json:"dst_port"`
+	Proto     string `json:"proto"`
+	PktCount  int64  `json:"pkt_count"`
+	ByteCount int64  `json:"byte_count"`
+	LastSeen  int64  `json:"last_seen_unix"`
 }
 
 // ReportPayload 上报载荷
 type ReportPayload struct {
-	Timestamp  int64         `json:"timestamp"`
-	Device     string        `json:"device"`
-	SamplingN  int           `json:"sampling_n"`
-	Flows      []FlowSample  `json:"flows"`
+	Timestamp  int64                  `json:"timestamp"`
+	Device     string                 `json:"device"`
+	SamplingN  int                    `json:"sampling_n"`
+	Flows      []FlowSample           `json:"flows"`
 	GlobalStat map[string]interface{} `json:"global_stat"`
 }
 
 func main() {
 	device := flag.String("d", "eth1", "采样网卡")
-	progPath := flag.String("prog", "./xdp_sampler.o", "XDP prog 路径")
 	xdpbanURL := flag.String("url", "http://localhost:8080/api/v1/samples", "xdp-ban 上报端点")
 	samplingN := flag.Int("n", 100, "采样率 1/N")
 	reportInterval := flag.Duration("interval", 10*time.Second, "上报间隔")
 	flag.Parse()
 
-	log.Printf("XDP 采样器启动: device=%s, sampling_rate=1/%d, report_url=%s\n", *device, *samplingN, *xdpbanURL)
+	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d\n", *device, *samplingN)
 
-	// 1. 加载 XDP prog
-	spec, err := ebpf.LoadCollectionSpec(*progPath)
+	// 1. 加载嵌入的 eBPF bytecode
+	reader := bytes.NewReader(xdpSamplerBytecode)
+	spec, err := ebpf.LoadCollectionSpec(reader)
 	if err != nil {
 		log.Fatalf("load ebpf spec: %v", err)
 	}
@@ -91,7 +93,7 @@ func main() {
 
 	// 3. 挂载 XDP prog
 	log.Printf("XDP prog 已加载(需 root 权限挂载到 %s):", *device)
-	log.Printf("  ip link set dev %s xdp obj %s", *device, *progPath)
+	log.Printf("  ip link set dev %s xdp obj <path> section xdp", *device)
 	log.Printf("")
 
 	// 4. 读 ringbuf → 上报
