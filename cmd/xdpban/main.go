@@ -32,7 +32,9 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(gin.Logger())
 	web.Register(r, db)
+	web.RegisterAPI(r, db)
 
 	log.Printf("xdp-ban listening on %s (db=%s)", addr, dbPath)
 	if err := r.Run(addr); err != nil {
@@ -68,6 +70,7 @@ func seed(db *gorm.DB) {
 	}
 	for _, p := range []struct{ t, l string }{
 		{"127.0.0.0/8", "环回(硬保护)"},
+		{"::1/128", "IPv6 环回"},
 		{"8.8.8.8", "公共DNS示例"},
 	} {
 		db.Create(&model.ProtectedTarget{Target: p.t, Label: p.l, Active: true})

@@ -29,6 +29,9 @@ func Register(r *gin.Engine, db *gorm.DB) {
 	r.GET("/approve/:token", h.approveShow)
 	r.POST("/approve/:token", h.approveDo)
 
+	// 静态资源
+	r.StaticFile("/favicon.ico", "favicon.ico")
+
 	auth := r.Group("/", h.requireLogin)
 	{
 		auth.GET("/", h.dashboard)
@@ -38,6 +41,14 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/bans", h.requireCap(policy.BanRequestCreate), h.banCreate)
 		auth.POST("/bans/:id/approve", h.requireCap(policy.BanRequestApprove), h.banApprove)
 		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
+		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
+
+		// 用户管理(admin only)
+		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
+		auth.POST("/users/:id/password", h.requireCap(policy.UserManage), h.userChangePassword)
+
+		// 审计日志(仅查看)
+		auth.GET("/audit", h.requireCap(policy.AuditView), h.auditLog)
 	}
 }
 
@@ -179,10 +190,103 @@ func (h *Handler) banReject(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/bans")
 }
 
+// banDetail 查看详情
+func (h *Handler) banDetail(c *gin.Context) {
+	u := h.currentUser(c)
+	var req model.BanRequest
+	if h.db.First(&req, c.Param("id")).Error != nil {
+		c.Redirect(http.StatusFound, "/bans")
+		return
+	}
+	var approver model.User
+	if req.ApprovedByID != nil {
+		h.db.First(&approver, *req.ApprovedByID)
+	}
+	c.HTML(http.StatusOK, "ban_detail.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"req": req, "approver": approver,
+		"canApprove": policy.Allow(u.Role, policy.BanRequestApprove) && req.State == "pending",
+	})
+}
+
+// ---- 用户管理 ----
+func (h *Handler) usersList(c *gin.Context) {
+	u := h.currentUser(c)
+	var users []model.User
+	h.db.Find(&users)
+	c.HTML(http.StatusOK, "users.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role), "users": users,
+	})
+}
+
+func (h *Handler) userChangePassword(c *gin.Context) {
+	u := h.currentUser(c)
+	var target model.User
+	if h.db.First(&target, c.Param("id")).Error != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "用户不存在"})
+		return
+	}
+	newPwd := c.PostForm("password")
+	if newPwd == "" {
+		c.HTML(http.StatusBadRequest, "error.html", gin.H{"msg": "密码不能为空"})
+		return
+	}
+	_ = target.SetPassword(newPwd)
+	h.db.Model(&target).Update("password_hash", target.PasswordHash)
+	model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(target.ID), "password_changed", "")
+	c.Redirect(http.StatusFound, "/users")
+}
+
+// ---- 审计日志 ----
+func (h *Handler) auditLog(c *gin.Context) {
+	u := h.currentUser(c)
+	var logs []model.AuditLog
+	h.db.Order("occurred_at desc").Limit(500).Find(&logs)
+	c.HTML(http.StatusOK, "audit.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role), "logs": logs,
+	})
+}
+
 // ---- 对外审批(占位;完整六铁律逻辑复用 internal/approval)----
 func (h *Handler) approveShow(c *gin.Context) {
-	c.HTML(http.StatusOK, "approve.html", gin.H{"token": c.Param("token")})
+	var token model.ApprovalToken
+	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "审批链接已失效或已使用"})
+		return
+	}
+	var req model.BanRequest
+	h.db.First(&req, token.BanRequestID)
+	c.HTML(http.StatusOK, "approve.html", gin.H{"token": token, "req": req})
 }
+
 func (h *Handler) approveDo(c *gin.Context) {
-	c.HTML(http.StatusOK, "approve_done.html", gin.H{})
+	var token model.ApprovalToken
+	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "审批链接已失效或已使用"})
+		return
+	}
+	var req model.BanRequest
+	if h.db.First(&req, token.BanRequestID).Error != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "请求不存在"})
+		return
+	}
+
+	action := c.PostForm("action") // approve / reject
+	now := time.Now()
+	h.db.Model(&token).Update("used_at", now)
+
+	if action == "approve" {
+		h.db.Model(&req).Updates(map[string]any{
+			"state":               "active",
+			"approved_by_id":      token.ApproverID,
+			"approved_by_policy":  "email_link",
+			"effective_at":        now,
+		})
+		model.WriteAudit(h.db, &token.ApproverID, "approver:"+itoa(token.ApproverID), "BanRequest", itoa(req.ID), "approved_external", "")
+	} else {
+		h.db.Model(&req).Update("state", "rejected")
+		model.WriteAudit(h.db, &token.ApproverID, "approver:"+itoa(token.ApproverID), "BanRequest", itoa(req.ID), "rejected_external", "")
+	}
+
+	c.HTML(http.StatusOK, "approve_done.html", gin.H{"action": action, "success": true})
 }

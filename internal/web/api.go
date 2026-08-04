@@ -1,0 +1,113 @@
+package web
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
+	"github.com/xdpban/xdp-ban/internal/model"
+	"github.com/xdpban/xdp-ban/internal/policy"
+	"github.com/xdpban/xdp-ban/internal/dispatch"
+	"github.com/xdpban/xdp-ban/internal/approval"
+	"github.com/xdpban/xdp-ban/internal/safety"
+)
+
+// API 返回 JSON 的端点
+func RegisterAPI(r *gin.Engine, db *gorm.DB) {
+	api := r.Group("/api/v1", apiAuth(db))
+	{
+		// 获取 dispatch 指令(智能体轮询)
+		api.GET("/dispatch/pending", getDispatchPending(db))
+		api.POST("/dispatch/:id/ack", markDispatchAck(db))
+		api.POST("/dispatch/:id/fail", markDispatchFail(db))
+	}
+}
+
+func apiAuth(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 简单 token 认证(生产改成 mTLS 或 OAuth)
+		token := c.GetHeader("X-API-Key")
+		if token == "" {
+			c.JSON(401, gin.H{"error": "missing api key"})
+			c.Abort()
+			return
+		}
+		// TODO: 验证 token
+		c.Next()
+	}
+}
+
+func getDispatchPending(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var dispatches []model.Dispatch
+		db.Where("state = ?", "pending").Limit(10).Find(&dispatches)
+		c.JSON(200, dispatches)
+	}
+}
+
+func markDispatchAck(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var d model.Dispatch
+		if db.First(&d, c.Param("id")).Error != nil {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
+		now := time.Now()
+		db.Model(&d).Updates(map[string]any{"state": "acked", "acked_at": now})
+		c.JSON(200, gin.H{"ok": true})
+	}
+}
+
+func markDispatchFail(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var d model.Dispatch
+		if db.First(&d, c.Param("id")).Error != nil {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
+		errMsg := c.PostForm("error")
+		d.Attempts++
+		d.LastError = errMsg
+		db.Model(&d).Updates(map[string]any{"state": "failed", "last_error": errMsg, "attempts": d.Attempts})
+		c.JSON(200, gin.H{"ok": true})
+	}
+}
+
+// Helper: 整合 dispatch + approval + safety guard
+func createBanWithApproval(db *gorm.DB, req *model.BanRequest, baseURL string) error {
+	// 1. 初始化
+	guard := safety.New([]string{}) // 加载保护集
+	var protTargets []model.ProtectedTarget
+	db.Where("active = ?", true).Find(&protTargets)
+	for _, pt := range protTargets {
+		guard.Add(pt.Target)
+	}
+
+	dispatchSvc := dispatch.NewService(db, guard)
+	approvalSvc := approval.NewService(db, baseURL)
+
+	// 2. 检查是否安全(SafetyGuard)
+	if err := guard.AssertSafe(req.Target); err != nil {
+		db.Model(req).Update("state", "safety_blocked")
+		return err
+	}
+
+	// 3. 需要邮件审批 → 生成 token 发送
+	if err := approvalSvc.GenTokensAndSend(req, req.RequestedByID); err != nil {
+		log.Printf("approval send error: %v", err)
+	}
+
+	return nil
+}
+
+// JSON 响应格式
+type APIResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data any    `json:"data,omitempty"`
+}
