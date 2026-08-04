@@ -50,10 +50,9 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 
 ## 快速开始
 
-```bash
-make bpf     # 编译 eBPF 目标文件(需 clang)
-make build   # 编译三个二进制
+下载二进制,直接运行。无依赖、无需编译 —— eBPF 目标文件已经嵌在里面。
 
+```bash
 ./xdp-ban    # http://localhost:8080  (默认 admin / admin12345,请立即修改)
 ```
 
@@ -90,24 +89,13 @@ XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 
 ## 从源码构建
 
+仅在你要改代码时需要 —— 发布的二进制已内嵌 eBPF 目标文件。
+
 ```bash
-make bpf      # clang → cmd/*/obj/*.o,由 go:embed 嵌入
-make build    # 三个静态二进制
+make bpf      # 编译 eBPF(需 clang)
+make build    # 编译三个二进制
 make check    # go vet + go test -race
-make dist     # 交叉编译 linux/{amd64,arm64} + SHA256SUMS
 ```
-
-测试与性能剖析:
-
-```bash
-make test       # go test -race ./...
-make bench      # 基准测试(含内存分配统计)
-make fuzz       # 对信任边界的解析函数做模糊测试
-make prof       # 采样热路径的 CPU/内存 profile
-make bench-api  # 对运行中的实例施加 HTTP 负载并采 pprof
-```
-
-数据面真机测量见 [`scripts/xdp-bench.sh`](scripts/xdp-bench.sh)(用 `bpftool` 读命中率,用 `perf` 看每包开销)。
 
 工程说明 —— 并发模型、错误处理规范、Go/eBPF 边界、实测的 profiling 结果 —— 见 [ENGINEERING.md](ENGINEERING.md)。
 

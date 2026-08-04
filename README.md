@@ -50,10 +50,9 @@ Sampling is **out-of-band**: it observes a copy of the traffic and always return
 
 ## Quick start
 
-```bash
-make bpf     # compile eBPF objects (needs clang)
-make build   # build the three binaries
+Download the binary and run it. No dependencies, no build step — the eBPF objects are already inside.
 
+```bash
 ./xdp-ban    # http://localhost:8080  (default admin / admin12345 — change it)
 ```
 
@@ -90,24 +89,13 @@ Without it, everything else works and the UI tells you the feature is unavailabl
 
 ## Build from source
 
+Only needed if you're hacking on it — released binaries already bundle the eBPF objects.
+
 ```bash
-make bpf      # clang → cmd/*/obj/*.o, embedded via go:embed
-make build    # three static binaries
+make bpf      # compile eBPF (needs clang)
+make build    # build the three binaries
 make check    # go vet + go test -race
-make dist     # cross-compile linux/{amd64,arm64} + SHA256SUMS
 ```
-
-Testing and profiling:
-
-```bash
-make test       # go test -race ./...
-make bench      # benchmarks with allocation stats
-make fuzz       # fuzz the parsers on trust boundaries
-make prof       # CPU/heap profile of the sampling hot path
-make bench-api  # HTTP load + pprof against a live instance
-```
-
-For data-plane measurements on real hardware, see [`scripts/xdp-bench.sh`](scripts/xdp-bench.sh) (hit rate via `bpftool`, per-packet cost via `perf`).
 
 Engineering notes — concurrency model, error-handling conventions, Go/eBPF boundary, and measured profiling results — are in [ENGINEERING.md](ENGINEERING.md).
 
