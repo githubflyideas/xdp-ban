@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Entry 一条 IP 区间记录
@@ -44,9 +45,9 @@ type DB struct {
 	byASN     map[uint32][]int
 
 	// 元信息,供界面展示"数据新鲜度"
-	sourcePath string
-	loadedAt   int64
-	totalCIDRs int
+	sourcePath    string
+	loadedAt      time.Time
+	overrideCount int
 }
 
 var (
@@ -75,21 +76,11 @@ func SetGlobal(db *DB) {
 // 加上两个索引 map 约 20 MB。这是常驻内存,必须让运维知情,
 // 因此 Stats() 会把条目数暴露到界面上。
 func Load(path string) (*DB, error) {
-	f, err := os.Open(path)
+	r, err := openMaybeGzip(path)
 	if err != nil {
-		return nil, fmt.Errorf("打开前缀库 %s: %w", path, err)
+		return nil, err
 	}
-	defer f.Close()
-
-	var r io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			return nil, fmt.Errorf("解压 %s: %w", path, err)
-		}
-		defer gz.Close()
-		r = gz
-	}
+	defer r.Close()
 
 	db := &DB{
 		byCountry:  make(map[string][]int, 256),
@@ -150,7 +141,15 @@ func Load(path string) (*DB, error) {
 	}
 
 	sort.Slice(db.entries, func(i, j int) bool { return db.entries[i].Start < db.entries[j].Start })
-	// 排序后索引失效,重建
+	db.rebuildIndex()
+	db.loadedAt = time.Now()
+
+	return db, nil
+}
+
+// rebuildIndex 重建国家 / ASN 索引。
+// 排序或合并覆盖规则后必须调用 —— 索引存的是下标,顺序一变就全错。
+func (db *DB) rebuildIndex() {
 	db.byCountry = make(map[string][]int, 256)
 	db.byASN = make(map[uint32][]int, 100000)
 	for i := range db.entries {
@@ -162,23 +161,64 @@ func Load(path string) (*DB, error) {
 			db.byASN[e.ASN] = append(db.byASN[e.ASN], i)
 		}
 	}
-
-	return db, nil
 }
 
 // Stats 数据库概况,供界面展示
 type Stats struct {
-	SourcePath string
-	Entries    int
-	Countries  int
-	ASNs       int
+	SourcePath    string
+	Entries       int
+	Countries     int
+	ASNs          int
+	LoadedAt      time.Time
+	OverrideCount int
 }
 
 func (db *DB) Stats() Stats {
 	return Stats{
-		SourcePath: db.sourcePath,
-		Entries:    len(db.entries),
-		Countries:  len(db.byCountry),
-		ASNs:       len(db.byASN),
+		SourcePath:    db.sourcePath,
+		Entries:       len(db.entries),
+		Countries:     len(db.byCountry),
+		ASNs:          len(db.byASN),
+		LoadedAt:      db.loadedAt,
+		OverrideCount: db.overrideCount,
 	}
+}
+
+// openMaybeGzip 打开文件,按内容嗅探而非扩展名判断是否 gzip。
+//
+// 按扩展名判断会在两种常见情形下出错:用户上传时改了文件名、
+// 或下载工具自动解压但保留了 .gz 后缀。嗅探魔术字节更可靠。
+func openMaybeGzip(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开 %s: %w", path, err)
+	}
+
+	var magic [2]byte
+	n, _ := io.ReadFull(f, magic[:])
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	if n == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("解压 %s: %w", path, err)
+		}
+		return &gzipCloser{gz: gz, f: f}, nil
+	}
+	return f, nil
+}
+
+type gzipCloser struct {
+	gz *gzip.Reader
+	f  *os.File
+}
+
+func (g *gzipCloser) Read(p []byte) (int, error) { return g.gz.Read(p) }
+func (g *gzipCloser) Close() error {
+	g.gz.Close()
+	return g.f.Close()
 }

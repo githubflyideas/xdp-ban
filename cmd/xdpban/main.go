@@ -38,19 +38,10 @@ func main() {
 
 	// 前缀库是可选的:没有它,按国家/AS 封禁功能在界面上提示未导入,
 	// 其余功能照常。不因缺少一个可选数据文件而拒绝启动。
-	if p := os.Getenv("XDPBAN_PREFIX_DB"); p != "" {
-		pdb, err := prefixdb.Load(p)
-		if err != nil {
-			log.Printf("加载前缀库失败(范围封禁功能将不可用): %v", err)
-		} else {
-			prefixdb.SetGlobal(pdb)
-			st := pdb.Stats()
-			log.Printf("前缀库已加载: %d 条区间, %d 个国家, %d 个 AS",
-				st.Entries, st.Countries, st.ASNs)
-		}
-	} else {
-		log.Printf("未设置 XDPBAN_PREFIX_DB,按国家/AS 封禁功能不可用")
-	}
+	//
+	// 加载顺序:显式指定的 XDPBAN_PREFIX_DB 优先,否则用数据目录中
+	// 由界面同步/上传产生的文件。这样一次配置之后,后续都从界面维护。
+	loadPrefixDB()
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -75,6 +66,40 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadPrefixDB 加载 IP 前缀库。
+//
+// 优先级:XDPBAN_PREFIX_DB(显式指定)> 数据目录中的界面维护文件。
+// 两者都没有时只记一条提示 —— 这是可选功能,不该阻塞启动。
+func loadPrefixDB() {
+	candidates := []string{}
+	if p := os.Getenv("XDPBAN_PREFIX_DB"); p != "" {
+		candidates = append(candidates, p)
+	}
+	candidates = append(candidates, prefixdb.ActivePath())
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		pdb, err := prefixdb.Load(p)
+		if err != nil {
+			log.Printf("加载前缀库 %s 失败: %v", p, err)
+			continue
+		}
+		prefixdb.SetGlobal(pdb)
+		st := pdb.Stats()
+		log.Printf("前缀库已加载(%s): %d 条区间, %d 个国家, %d 个 AS",
+			p, st.Entries, st.Countries, st.ASNs)
+
+		// 本地覆盖规则要在主库之上生效
+		if err := prefixdb.Reload(); err != nil && p == prefixdb.ActivePath() {
+			log.Printf("应用本地覆盖规则: %v", err)
+		}
+		return
+	}
+	log.Printf("未找到 IP 前缀库,按国家/AS 封禁功能不可用 —— 可在界面「IP 库管理」中同步或上传")
 }
 
 // seed 初始账号 + 保护集(仅当空库)。生产首次登录须改密码。

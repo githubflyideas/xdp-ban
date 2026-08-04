@@ -208,6 +208,8 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		return
 	}
 	if sb.RequestedByID != nil && *sb.RequestedByID == u.ID {
+		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID),
+			"self_approval_denied", "")
 		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
 		return
 	}

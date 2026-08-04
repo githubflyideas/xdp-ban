@@ -227,3 +227,43 @@ const scopedListTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 {{else}}<tr><td colspan="7" style="color:#98a2b3">暂无范围封禁规则</td></tr>
 {{end}}</tbody></table></div>
 </main></div></body></html>`
+
+const reportTpl = `<!doctype html><html><head><meta charset="utf-8"><title>合规报告 · xdp-ban</title>{{template "_head"}}
+<style>
+.rng{display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:420px}
+.why{background:#f7f9fc;border-left:3px solid #1e3050;padding:12px 14px;margin-bottom:18px;font-size:12.5px;line-height:1.7}
+.why strong{color:#0f1b2d}
+.fmt{display:flex;gap:12px;margin-top:18px}
+.fmt a{flex:1;text-align:center}
+</style></head>
+<body>` + navTpl + `<h1>合规报告导出</h1>
+
+<div class="why">
+导出的报告回答测评人员最常问的四个问题:<strong>谁、在何时、封了什么、谁批的、为什么</strong>。
+报告同时统计四眼原则拦截次数、保护集否决次数、大范围二次确认次数 ——
+这些数字是"控制措施真的在运行"的证据,比在文档里声称有机制更有说服力。
+<br><br>
+数据源为系统审计日志(只增不可修改)。导出动作本身也会记入审计。
+</div>
+
+<div class="card"><div class="hd">统计区间</div><div class="bd">
+<form method="get" action="/report/export" id="repForm">
+<div class="rng">
+  <div><label>起始日期</label><input type="date" name="from" value="{{.defaultFrom}}"></div>
+  <div><label>结束日期</label><input type="date" name="to" value="{{.defaultTo}}"></div>
+</div>
+<div class="hint" style="color:#67748a;font-size:11.5px;margin-top:6px">
+默认为上一个自然月至今。结束日期含当天。</div>
+
+<div class="fmt">
+  <button class="btn primary" type="submit" name="format" value="html">
+    生成可打印报告(→ PDF)</button>
+  <button class="btn" type="submit" name="format" value="csv">
+    导出 CSV(Excel 核对)</button>
+</div>
+<div class="hint" style="color:#98a2b3;font-size:11px;margin-top:10px">
+可打印报告在新窗口打开,点页面上的"打印"按钮后在对话框中选择"另存为 PDF"。
+不内置 PDF 生成器是为了避免中文字体问题 —— 浏览器用系统字体,中文永不出方块。</div>
+</form>
+</div></div>
+</main></div></body></html>`

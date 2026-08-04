@@ -83,8 +83,20 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
 		auth.POST("/users/:id/password", h.requireCap(policy.UserManage), h.userChangePassword)
 
+		// IP 前缀库管理(在线同步 / 离线上传 / 本地覆盖规则)
+		auth.GET("/prefixdb", h.requireCap(policy.SystemConfig), h.prefixDBPage)
+		auth.POST("/prefixdb/sync", h.requireCap(policy.SystemConfig), h.prefixDBSync)
+		auth.GET("/prefixdb/status", h.requireCap(policy.SystemConfig), h.prefixDBStatus)
+		auth.POST("/prefixdb/upload", h.requireCap(policy.SystemConfig), h.prefixDBUpload)
+		auth.POST("/prefixdb/overrides", h.requireCap(policy.SystemConfig), h.prefixDBSaveOverride)
+
 		// 审计日志(仅查看)
 		auth.GET("/audit", h.requireCap(policy.AuditView), h.auditLog)
+
+		// 合规报告导出。用 AuditView 而非 SystemConfig:
+		// 取证是审计人员的职责,不该要求他们拿到系统配置权限。
+		auth.GET("/report", h.requireCap(policy.AuditView), h.reportPage)
+		auth.GET("/report/export", h.requireCap(policy.AuditView), h.reportExport)
 	}
 }
 
@@ -234,6 +246,8 @@ func (h *Handler) banApprove(c *gin.Context) {
 
 	// 四眼原则
 	if req.RequestedByID != nil && *req.RequestedByID == u.ID {
+		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID),
+			"self_approval_denied", "")
 		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
 		return
 	}

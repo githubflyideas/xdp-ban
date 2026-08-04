@@ -27,6 +27,8 @@ func templates() *template.Template {
 	template.Must(t.New("sampling.html").Parse(samplingTpl))
 	template.Must(t.New("scoped_new.html").Parse(scopedNewTpl))
 	template.Must(t.New("scoped_list.html").Parse(scopedListTpl))
+	template.Must(t.New("report.html").Parse(reportTpl))
+	template.Must(t.New("prefixdb.html").Parse(prefixDBTpl))
 	template.Must(t.New("users.html").Parse(usersTpl))
 	template.Must(t.New("audit.html").Parse(auditTpl))
 	template.Must(t.New("error.html").Parse(errTpl))
