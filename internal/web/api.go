@@ -25,6 +25,9 @@ func RegisterAPI(r *gin.Engine, db *gorm.DB) {
 		api.GET("/dispatch/pending", getDispatchPending(db))
 		api.POST("/dispatch/:id/ack", markDispatchAck(db))
 		api.POST("/dispatch/:id/fail", markDispatchFail(db))
+
+		// 采样上报端点
+		api.POST("/samples", reportSamples(db))
 	}
 }
 
@@ -74,6 +77,47 @@ func markDispatchFail(db *gorm.DB) gin.HandlerFunc {
 		d.Attempts++
 		d.LastError = errMsg
 		db.Model(&d).Updates(map[string]any{"state": "failed", "last_error": errMsg, "attempts": d.Attempts})
+		c.JSON(200, gin.H{"ok": true})
+	}
+}
+
+// FlowSample 上报的流统计
+type FlowSample struct {
+	SrcIP     string `json:"src_ip"`
+	DstIP     string `json:"dst_ip"`
+	SrcPort   int    `json:"src_port"`
+	DstPort   int    `json:"dst_port"`
+	Proto     string `json:"proto"`
+	PktCount  int64  `json:"pkt_count"`
+	ByteCount int64  `json:"byte_count"`
+	LastSeen  int64  `json:"last_seen_unix"`
+}
+
+// SampleReport 采样上报载荷
+type SampleReport struct {
+	Timestamp  int64           `json:"timestamp"`
+	Device     string          `json:"device"`
+	SamplingN  int             `json:"sampling_n"`
+	Flows      []FlowSample    `json:"flows"`
+	GlobalStat map[string]interface{} `json:"global_stat"`
+}
+
+// reportSamples 接收采样数据上报
+func reportSamples(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var report SampleReport
+		if err := c.BindJSON(&report); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		// 存储流量统计(可用于仪表板展示、告警)
+		log.Printf("[SAMPLES] device=%s flows=%d sampling_n=%d",
+			report.Device, len(report.Flows), report.SamplingN)
+
+		// 示例:存到 Redis/时序库 或内存缓冲(这里省略具体实现)
+		// 可后续扩展为威胁检测:异常流量告警等
+
 		c.JSON(200, gin.H{"ok": true})
 	}
 }
