@@ -20,9 +20,14 @@ import (
 	"github.com/xdpban/xdp-ban/internal/web"
 )
 
+// Version 由 -ldflags "-X main.Version=..." 注入
+var Version = "dev"
+
 func main() {
 	dbPath := env("XDPBAN_DB", "xdpban.db")
 	addr := env("XDPBAN_ADDR", ":8080")
+
+	log.Printf("xdp-ban %s starting", Version)
 
 	db, err := model.Open(dbPath)
 	if err != nil {

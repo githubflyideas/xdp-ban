@@ -51,20 +51,33 @@ func (s *Service) CreateDispatch(req *model.BanRequest) (*model.Dispatch, string
 	// 2. ResolutionPolicy: 当前 IP 有没有更高优先级的来源在拦它
 	res := resolution.Resolve([]string{req.Source}, false)
 
-	// 3. 生成幂等键(同一 req + target → 相同 ban_id)
+	// 3. 幂等键:同一请求 + 同一目标恒定映射到同一 ban_id
 	banID := fmt.Sprintf("ban-%d-%s", req.ID, req.Target)
 
-	// 4. 载荷
+	// 已存在同 ban_id 的指令则直接复用,避免重复审批/重放造成重复下发
+	var existing model.Dispatch
+	if err := s.db.Where("ban_id = ?", banID).First(&existing).Error; err == nil {
+		return &existing, resolution.Explain("ban", res), nil
+	}
+
+	// 4. 载荷。TTLSeconds 为 nil 表示永久封禁(阶梯最高级),不能直接解引用。
+	ttl := int64(0)
+	if req.TTLSeconds != nil {
+		ttl = *req.TTLSeconds
+	}
 	payload := BanPayload{
 		Target:  req.Target,
-		TTLSecs: *req.TTLSeconds,
+		TTLSecs: ttl,
 		NodeID:  "local",
 		ReqID:   req.ID,
 		BanID:   banID,
-		Backend: "nftables", // 默认;可从配置改
+		Backend: "xdp", // 执行层是纯 eBPF/XDP,不经 nftables
 		Reason:  req.Reason,
 	}
-	payloadJSON, _ := json.Marshal(payload)
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal payload: %w", err)
+	}
 
 	// 5. 写 dispatch
 	dispatch := &model.Dispatch{
@@ -75,15 +88,15 @@ func (s *Service) CreateDispatch(req *model.BanRequest) (*model.Dispatch, string
 		State:        "pending",
 	}
 	if err := s.db.Create(dispatch).Error; err != nil {
-		return nil, "", fmt.Errorf("create dispatch: %v", err)
+		return nil, "", fmt.Errorf("create dispatch: %w", err)
 	}
 
 	// 6. 审计
-	model.WriteAudit(s.db, req.ApprovedByID, "dispatch", "Dispatch", fmt.Sprint(dispatch.ID), "created", string(payloadJSON))
+	_ = model.WriteAudit(s.db, req.ApprovedByID, "dispatch", "Dispatch",
+		fmt.Sprint(dispatch.ID), "created", string(payloadJSON))
 
 	// 7. 返回裁决理由
-	explain := resolution.Explain("ban", res)
-	return dispatch, explain, nil
+	return dispatch, resolution.Explain("ban", res), nil
 }
 
 // MarkAcked 智能体确认接收

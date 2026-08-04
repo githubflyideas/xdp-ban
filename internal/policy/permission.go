@@ -62,17 +62,15 @@ type NavSection struct {
 	Cap   Capability
 }
 
-// NavSections 该角色能看到的功能区(对应 Rails Permission.nav_sections)
+// NavSections 该角色能看到的功能区。
+// 只列出已实现路由的区块——导航项与真实页面一一对应,不给死链。
 func NavSections(role string) []NavSection {
 	all := []NavSection{
 		{"dashboard", "Dashboard", DashboardView},
 		{"bans", "封禁请求", BanRequestView},
 		{"sampling", "采样配置", SystemConfig},
-		{"allowlist", "黑白名单", AllowlistManage},
-		{"sources", "来源与策略", SourcePolicyManage},
 		{"audit", "审计日志", AuditView},
 		{"users", "用户管理", UserManage},
-		{"system", "系统配置", SystemConfig},
 	}
 	var out []NavSection
 	for _, s := range all {

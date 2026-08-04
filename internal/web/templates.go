@@ -47,7 +47,7 @@ input,select{width:100%;padding:8px 10px;border:1px solid #c3ccd9;border-radius:
 
 const navTpl = `<div class="topbar"><span class="brand">XDP<b>-ban</b></span><span class="spacer"></span>
 <span class="who">{{.u.Username}}<span class="role">{{.u.Role}}</span></span><a href="/logout">退出</a></div>
-<div class="shell"><aside class="side">{{range .nav}}<a {{if eq .Key "sampling"}}href="/sampling"{{else if eq .Key "dashboard"}}href="/dashboard"{{else if eq .Key "bans"}}href="/bans"{{else if eq .Key "users"}}href="/users"{{else if eq .Key "audit"}}href="/audit"{{else}}href="/{{.Key}}"{{end}}">{{.Label}}</a>{{end}}</aside><main class="main">`
+<div class="shell"><aside class="side">{{range .nav}}<a href="/{{.Key}}">{{.Label}}</a>{{end}}</aside><main class="main">`
 
 const loginTpl = `<!doctype html><html><head><meta charset="utf-8"><title>xdp-ban</title>{{template "_head"}}</head>
 <body><div style="max-width:360px;margin:9vh auto">

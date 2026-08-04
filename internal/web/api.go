@@ -1,40 +1,60 @@
 package web
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
-	"strconv"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	"github.com/xdpban/xdp-ban/internal/model"
-	"github.com/xdpban/xdp-ban/internal/policy"
-	"github.com/xdpban/xdp-ban/internal/dispatch"
-	"github.com/xdpban/xdp-ban/internal/approval"
-	"github.com/xdpban/xdp-ban/internal/safety"
 )
 
-// API 返回 JSON 的端点
+// apiKey 是 agent / sampler 访问 /api/v1 的共享密钥。
+// 生产部署应改为 mTLS 或 per-node token;这里保持单密钥以匹配单二进制的部署形态。
+func apiKey() string {
+	if v := os.Getenv("XDPBAN_API_KEY"); v != "" {
+		return v
+	}
+	return "changeme"
+}
+
+// RegisterAPI 注册供执行器/采样器调用的 JSON 端点。
+//
+// 注意:这些路由不走浏览器会话,只认 X-API-Key。
 func RegisterAPI(r *gin.Engine, db *gorm.DB) {
-	api := r.Group("/api/v1", apiAuth(db))
+	api := r.Group("/api/v1", apiAuth())
 	{
-		// 获取 dispatch 指令(智能体轮询)
+		// 执行器轮询与回执
 		api.GET("/dispatch/pending", getDispatchPending(db))
 		api.POST("/dispatch/:id/ack", markDispatchAck(db))
 		api.POST("/dispatch/:id/fail", markDispatchFail(db))
 
-		// 采样上报端点
-		api.POST("/samples", reportSamples(db))
+		// 采样器上报
+		api.POST("/samples", receiveSamples(db))
+	}
+}
+
+// apiAuth 校验 X-API-Key。密钥不匹配一律 401,不区分"缺失"与"错误"。
+func apiAuth() gin.HandlerFunc {
+	want := apiKey()
+	return func(c *gin.Context) {
+		if c.GetHeader("X-API-Key") != want {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Next()
 	}
 }
 
 func getDispatchPending(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var dispatches []model.Dispatch
-		db.Where("state = ?", "pending").Limit(10).Find(&dispatches)
+		if err := db.Where("state = ?", "pending").Limit(50).Find(&dispatches).Error; err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(200, dispatches)
 	}
 }
@@ -47,7 +67,11 @@ func markDispatchAck(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		now := time.Now()
-		db.Model(&d).Updates(map[string]any{"state": "acked", "acked_at": now})
+		if err := db.Model(&d).Updates(map[string]any{"state": "acked", "acked_at": now}).Error; err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		_ = model.WriteAudit(db, nil, "agent", "Dispatch", itoa(d.ID), "acked", "")
 		c.JSON(200, gin.H{"ok": true})
 	}
 }
@@ -59,15 +83,32 @@ func markDispatchFail(db *gorm.DB) gin.HandlerFunc {
 			c.JSON(404, gin.H{"error": "not found"})
 			return
 		}
+
+		// agent 以 JSON 体或表单提交错误原因,两种都接受
 		errMsg := c.PostForm("error")
-		d.Attempts++
-		d.LastError = errMsg
-		db.Model(&d).Updates(map[string]any{"state": "failed", "last_error": errMsg, "attempts": d.Attempts})
+		if errMsg == "" {
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := c.ShouldBindJSON(&body); err == nil {
+				errMsg = body.Error
+			}
+		}
+
+		if err := db.Model(&d).Updates(map[string]any{
+			"state":      "failed",
+			"last_error": errMsg,
+			"attempts":   d.Attempts + 1,
+		}).Error; err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		_ = model.WriteAudit(db, nil, "agent", "Dispatch", itoa(d.ID), "failed", errMsg)
 		c.JSON(200, gin.H{"ok": true})
 	}
 }
 
-// FlowSample 上报的流统计
+// FlowSample 采样器上报的单条流统计
 type FlowSample struct {
 	SrcIP     string `json:"src_ip"`
 	DstIP     string `json:"dst_ip"`
@@ -79,65 +120,30 @@ type FlowSample struct {
 	LastSeen  int64  `json:"last_seen_unix"`
 }
 
-// SampleReport 采样上报载荷
+// SampleReport 一次上报的完整载荷
 type SampleReport struct {
-	Timestamp  int64           `json:"timestamp"`
-	Device     string          `json:"device"`
-	SamplingN  int             `json:"sampling_n"`
-	Flows      []FlowSample    `json:"flows"`
-	GlobalStat map[string]interface{} `json:"global_stat"`
+	Timestamp  int64          `json:"timestamp"`
+	Device     string         `json:"device"`
+	SamplingN  int            `json:"sampling_n"`
+	Flows      []FlowSample   `json:"flows"`
+	GlobalStat map[string]any `json:"global_stat"`
 }
 
-// reportSamples 接收采样数据上报
-func reportSamples(db *gorm.DB) gin.HandlerFunc {
+// receiveSamples 接收采样上报,写入内存环形缓冲供仪表板读取。
+//
+// 采样数据是高频、可丢弃的观测值,不落 SQLite——避免把审计库变成时序库。
+func receiveSamples(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var report SampleReport
-		if err := c.BindJSON(&report); err != nil {
+		if err := c.ShouldBindJSON(&report); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
 
-		// 存储流量统计(可用于仪表板展示、告警)
-		log.Printf("[SAMPLES] device=%s flows=%d sampling_n=%d",
+		SampleStore.Put(report)
+		log.Printf("[samples] device=%s flows=%d sampling=1/%d",
 			report.Device, len(report.Flows), report.SamplingN)
 
-		// 示例:存到 Redis/时序库 或内存缓冲(这里省略具体实现)
-		// 可后续扩展为威胁检测:异常流量告警等
-
-		c.JSON(200, gin.H{"ok": true})
+		c.JSON(200, gin.H{"ok": true, "accepted": len(report.Flows)})
 	}
-}
-
-// Helper: 整合 dispatch + approval + safety guard
-func createBanWithApproval(db *gorm.DB, req *model.BanRequest, baseURL string) error {
-	// 1. 初始化
-	guard := safety.New([]string{}) // 加载保护集
-	var protTargets []model.ProtectedTarget
-	db.Where("active = ?", true).Find(&protTargets)
-	for _, pt := range protTargets {
-		guard.Add(pt.Target)
-	}
-
-	dispatchSvc := dispatch.NewService(db, guard)
-	approvalSvc := approval.NewService(db, baseURL)
-
-	// 2. 检查是否安全(SafetyGuard)
-	if err := guard.AssertSafe(req.Target); err != nil {
-		db.Model(req).Update("state", "safety_blocked")
-		return err
-	}
-
-	// 3. 需要邮件审批 → 生成 token 发送
-	if err := approvalSvc.GenTokensAndSend(req, req.RequestedByID); err != nil {
-		log.Printf("approval send error: %v", err)
-	}
-
-	return nil
-}
-
-// JSON 响应格式
-type APIResp struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data any    `json:"data,omitempty"`
 }

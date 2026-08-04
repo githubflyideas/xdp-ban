@@ -2,23 +2,39 @@
 package web
 
 import (
+	"io"
+	"log"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/xdpban/xdp-ban/internal/approval"
 	"github.com/xdpban/xdp-ban/internal/model"
 	"github.com/xdpban/xdp-ban/internal/policy"
 )
 
-type Handler struct{ db *gorm.DB }
+type Handler struct {
+	db        *gorm.DB
+	approvals *approval.Service
+	// samplerURL 是 xdp-sampler 的控制端点,用于下发采样率
+	samplerURL string
+}
 
 // 极简会话:内存 token→userID(单机单实例;生产可换 cookie 签名/Redis)
 var sessions = map[string]uint{}
 
 func Register(r *gin.Engine, db *gorm.DB) {
-	h := &Handler{db: db}
+	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
+	h := &Handler{
+		db:         db,
+		approvals:  approval.NewService(db, baseURL),
+		samplerURL: envOr("XDPBAN_SAMPLER_URL", "http://localhost:9090"),
+	}
 	r.SetHTMLTemplate(templates())
 
 	r.GET("/login", h.loginPage)
@@ -151,17 +167,41 @@ func (h *Handler) banNew(c *gin.Context) {
 
 func (h *Handler) banCreate(c *gin.Context) {
 	u := h.currentUser(c)
-	req := model.BanRequest{
-		ActionType: "ban", Target: c.PostForm("target"), Source: "manual",
-		Reason: c.PostForm("reason"), State: "pending", RequestedByID: &u.ID,
-		ApprovalMode: "manual_dual",
-	}
-	if req.Target == "" {
-		c.HTML(http.StatusBadRequest, "ban_new.html", gin.H{"u": u, "nav": policy.NavSections(u.Role), "err": "目标不能为空"})
+	target := strings.TrimSpace(c.PostForm("target"))
+	nav := policy.NavSections(u.Role)
+
+	if target == "" {
+		c.HTML(http.StatusBadRequest, "ban_new.html", gin.H{"u": u, "nav": nav, "err": "目标不能为空"})
 		return
 	}
-	h.db.Create(&req)
-	model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "created", "")
+
+	// 提交阶段就做一次安全预检:被保护集覆盖的目标根本不该进审批队列,
+	// 让提交者立刻知道原因,而不是等审批后才在下发环节静默失败。
+	if reason := h.guard().VetoReason(target); reason != "" {
+		c.HTML(http.StatusBadRequest, "ban_new.html", gin.H{"u": u, "nav": nav, "err": reason})
+		return
+	}
+
+	// 阶梯封禁:按该目标的历史决定本次 TTL
+	ttl := h.nextTTL(target)
+
+	req := model.BanRequest{
+		ActionType: "ban", Target: target, Source: "manual",
+		Reason: strings.TrimSpace(c.PostForm("reason")), State: "pending",
+		RequestedByID: &u.ID, ApprovalMode: "manual_dual",
+		TTLSeconds: ttl,
+	}
+	if err := h.db.Create(&req).Error; err != nil {
+		c.HTML(http.StatusInternalServerError, "ban_new.html", gin.H{"u": u, "nav": nav, "err": err.Error()})
+		return
+	}
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "created", target)
+
+	// 生成邮件审批令牌并通知 approver(四眼原则由 approval 服务保证不发给提交者)
+	if err := h.approvals.GenTokensAndSend(&req, &u.ID); err != nil {
+		log.Printf("发送审批通知失败 req=%d: %v", req.ID, err)
+	}
+
 	c.Redirect(http.StatusFound, "/bans")
 }
 
@@ -172,15 +212,43 @@ func (h *Handler) banApprove(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/bans")
 		return
 	}
+
 	// 四眼原则
 	if req.RequestedByID != nil && *req.RequestedByID == u.ID {
 		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
 		return
 	}
+	if req.State != "pending" {
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已处理,当前状态:" + req.State})
+		return
+	}
+
 	now := time.Now()
-	h.db.Model(&req).Updates(map[string]any{"state": "active", "approved_by_id": u.ID, "effective_at": now})
-	model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "approved", "")
-	// TODO: DispatchService 生成 dispatch → 经 SafetyGuard → 下发 agent
+	updates := map[string]any{
+		"state":          "active",
+		"approved_by_id": u.ID,
+		"effective_at":   now,
+	}
+	if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+		expires := now.Add(time.Duration(*req.TTLSeconds) * time.Second)
+		updates["expires_at"] = expires
+	}
+	if err := h.db.Model(&req).Updates(updates).Error; err != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+		return
+	}
+	req.ApprovedByID = &u.ID
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "BanRequest", itoa(req.ID), "approved", "")
+
+	// 生成下发指令:SafetyGuard 在此处是最后一道否决,无旁路
+	if _, explain, err := h.dispatches().CreateDispatch(&req); err != nil {
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+		return
+	}
+
+	// 推进阶梯状态,使下一次封禁时长自然增长
+	h.recordLadder(req.Target)
+
 	c.Redirect(http.StatusFound, "/bans")
 }
 
@@ -252,45 +320,62 @@ func (h *Handler) auditLog(c *gin.Context) {
 }
 
 // ---- 采样管理 ----
+
+// samplingConfig 展示采样配置页:当前采样率 + 最近观测到的流量。
 func (h *Handler) samplingConfig(c *gin.Context) {
 	u := h.currentUser(c)
 	c.HTML(http.StatusOK, "sampling.html", gin.H{
 		"u": u, "nav": policy.NavSections(u.Role),
 		"canConfigure": policy.Allow(u.Role, policy.SystemConfig),
+		"samplerURL":   h.samplerURL,
+		"currentN":     SampleStore.SamplingN(),
+		"topFlows":     SampleStore.TopFlows(5*time.Minute, 20),
 	})
 }
 
+// setSamplingRate 把新的采样率转发给 xdp-sampler 的控制端点。
+//
+// xdp-ban 自己不碰 eBPF map——采样器才是那份 map 的持有者;
+// 这里只做校验、转发、审计。
 func (h *Handler) setSamplingRate(c *gin.Context) {
 	u := h.currentUser(c)
-	rate := c.PostForm("rate")
-	if rate == "" {
-		c.JSON(400, gin.H{"error": "rate required"})
+
+	rate, err := parseRate(c.PostForm("rate"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 转发到 xdp-sampler 的 HTTP API
-	samplerURL := c.PostForm("sampler_url")
+	samplerURL := strings.TrimSpace(c.PostForm("sampler_url"))
 	if samplerURL == "" {
-		samplerURL = "http://localhost:9090"  // 默认
+		samplerURL = h.samplerURL
 	}
 
-	// 调用 xdp-sampler /api/sampling/rate
-	resp, err := http.PostForm(samplerURL+"/api/sampling/rate", map[string][]string{
-		"rate": {rate},
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.PostForm(samplerURL+"/api/sampling/rate", url.Values{
+		"rate": {strconv.Itoa(rate)},
 	})
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": "无法连接采样器: " + err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 
-	// 审计
-	model.WriteAudit(h.db, &u.ID, u.Label(), "SamplingConfig", "1", "rate_changed", rate)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": "采样器拒绝请求: " + strings.TrimSpace(string(body)),
+		})
+		return
+	}
 
-	c.JSON(200, gin.H{"ok": true, "rate": rate})
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "SamplingConfig", "1",
+		"rate_changed", strconv.Itoa(rate))
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "rate": rate})
 }
 
-// ---- 对外审批(占位;完整六铁律逻辑复用 internal/approval)----
+// ---- 对外审批(唯一公网路由;部署时单独暴露 + HTTPS + 限流)----
 func (h *Handler) approveShow(c *gin.Context) {
 	var token model.ApprovalToken
 	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
@@ -303,32 +388,76 @@ func (h *Handler) approveShow(c *gin.Context) {
 }
 
 func (h *Handler) approveDo(c *gin.Context) {
+	action := c.PostForm("action") // approve / reject
+	if action != "approve" && action != "reject" {
+		c.HTML(http.StatusBadRequest, "error.html", gin.H{"msg": "非法操作"})
+		return
+	}
+
+	now := time.Now()
 	var token model.ApprovalToken
-	if h.db.Where("token = ? AND expires_at > ? AND used_at IS NULL", c.Param("token"), time.Now()).First(&token).Error != nil {
+	var req model.BanRequest
+
+	// 令牌消费与状态推进放在一个事务里:
+	// used_at 的写入必须与审批结果同生共死,否则重放窗口会打开。
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("token = ? AND expires_at > ? AND used_at IS NULL",
+			c.Param("token"), now).First(&token).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&req, token.BanRequestID).Error; err != nil {
+			return err
+		}
+		if req.State != "pending" {
+			return errStateConflict
+		}
+		// 四眼原则:令牌本不该发给提交者,这里再兜一道
+		if req.RequestedByID != nil && *req.RequestedByID == token.ApproverID {
+			return errSelfApproval
+		}
+
+		if err := tx.Model(&token).Update("used_at", now).Error; err != nil {
+			return err
+		}
+
+		if action == "approve" {
+			updates := map[string]any{
+				"state":              "active",
+				"approved_by_id":     token.ApproverID,
+				"approved_by_policy": "email_link",
+				"effective_at":       now,
+			}
+			if req.TTLSeconds != nil && *req.TTLSeconds > 0 {
+				updates["expires_at"] = now.Add(time.Duration(*req.TTLSeconds) * time.Second)
+			}
+			return tx.Model(&req).Updates(updates).Error
+		}
+		return tx.Model(&req).Update("state", "rejected").Error
+	})
+
+	switch {
+	case err == errSelfApproval:
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": "不能审批自己提交的请求(四眼原则)"})
+		return
+	case err == errStateConflict:
+		c.HTML(http.StatusConflict, "error.html", gin.H{"msg": "该请求已被处理"})
+		return
+	case err != nil:
 		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "审批链接已失效或已使用"})
 		return
 	}
-	var req model.BanRequest
-	if h.db.First(&req, token.BanRequestID).Error != nil {
-		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "请求不存在"})
-		return
-	}
 
-	action := c.PostForm("action") // approve / reject
-	now := time.Now()
-	h.db.Model(&token).Update("used_at", now)
-
+	actor := "approver:" + itoa(token.ApproverID)
 	if action == "approve" {
-		h.db.Model(&req).Updates(map[string]any{
-			"state":               "active",
-			"approved_by_id":      token.ApproverID,
-			"approved_by_policy":  "email_link",
-			"effective_at":        now,
-		})
-		model.WriteAudit(h.db, &token.ApproverID, "approver:"+itoa(token.ApproverID), "BanRequest", itoa(req.ID), "approved_external", "")
+		_ = model.WriteAudit(h.db, &token.ApproverID, actor, "BanRequest", itoa(req.ID), "approved_external", "")
+		req.ApprovedByID = &token.ApproverID
+		if _, explain, derr := h.dispatches().CreateDispatch(&req); derr != nil {
+			c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+			return
+		}
+		h.recordLadder(req.Target)
 	} else {
-		h.db.Model(&req).Update("state", "rejected")
-		model.WriteAudit(h.db, &token.ApproverID, "approver:"+itoa(token.ApproverID), "BanRequest", itoa(req.ID), "rejected_external", "")
+		_ = model.WriteAudit(h.db, &token.ApproverID, actor, "BanRequest", itoa(req.ID), "rejected_external", "")
 	}
 
 	c.HTML(http.StatusOK, "approve_done.html", gin.H{"action": action, "success": true})

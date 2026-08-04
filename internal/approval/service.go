@@ -14,10 +14,14 @@ import (
 	"github.com/xdpban/xdp-ban/internal/model"
 )
 
+// TokenTTL 是邮件审批链接的有效期。短窗口是刻意的:
+// 审批链接等价于一次特权操作,泄漏窗口越短越好。
+const TokenTTL = 10 * time.Minute
+
 // Service 审批服务
 type Service struct {
 	db       *gorm.DB
-	baseURL  string // 邮件中的链接前缀,如 https://xdpban.example.com
+	baseURL  string                            // 邮件中的链接前缀,如 https://xdpban.example.com
 	mailSend func(to, subj, body string) error // 可注入,便于测试
 }
 
@@ -33,67 +37,75 @@ func NewService(db *gorm.DB, baseURL string) *Service {
 	}
 }
 
-// GenTokensAndSend 审批通过后调用:生成 token 并发邮件通知 approver。
-// 四眼原则:不能让 requester 来批。自动选下一个 admin/approver。
+// GenTokensAndSend 生成一次性审批令牌并邮件通知 approver。
+//
+// 四眼原则在这里落地:候选 approver 集合显式排除提交者本人,
+// 所以邮件链接天然不可能落到提交者手上。
 func (s *Service) GenTokensAndSend(req *model.BanRequest, requesterID *uint) error {
-	// 检查是否需要邮件审批(可从配置),这里默认 manual_dual 的第二阶段要邮件
 	if req.ApprovalMode != "manual_dual" {
 		return nil
 	}
 
-	// 查找一个 admin 或 approver 来批(且不是 requester)
+	// 查找 admin/approver 作为审批人,排除提交者
+	q := s.db.Where("role IN ? AND active = ?", []string{"admin", "approver"}, true)
+	if requesterID != nil {
+		q = q.Where("id <> ?", *requesterID)
+	}
 	var approvers []model.User
-	s.db.Where("role IN (?) AND active = ? AND id != ?", []string{"admin", "approver"}, true, requesterID).
-		Limit(2).Find(&approvers)
-
+	if err := q.Limit(2).Find(&approvers).Error; err != nil {
+		return fmt.Errorf("查找审批人: %w", err)
+	}
 	if len(approvers) == 0 {
-		// 没有其他 approver,跳过邮件阶段(可改成返回错误)
+		// 没有第二个人可审批:记审计,留待人工在界面处理,不阻塞提交
+		_ = model.WriteAudit(s.db, requesterID, "system", "BanRequest",
+			fmt.Sprint(req.ID), "approval_mail_skipped", "无可用审批人")
 		return nil
 	}
 
-	// 发给第一个 approver
 	approver := approvers[0]
 
-	// 生成一次性 token(10 分钟有效)
 	token := randToken()
 	now := time.Now()
-	expiresAt := now.Add(10 * time.Minute)
-
 	approvalToken := &model.ApprovalToken{
 		BanRequestID: req.ID,
 		ApproverID:   approver.ID,
 		Token:        token,
-		ExpiresAt:    expiresAt,
+		ExpiresAt:    now.Add(TokenTTL),
 		SentToEmail:  approver.Email,
 	}
 	if err := s.db.Create(approvalToken).Error; err != nil {
-		return err
+		return fmt.Errorf("创建审批令牌: %w", err)
 	}
 
-	// 记录审计
-	model.WriteAudit(s.db, req.RequestedByID, "approver", "ApprovalToken", fmt.Sprint(approvalToken.ID), "sent", "")
+	requester := "unknown"
+	if requesterID != nil {
+		requester = fmt.Sprintf("user#%d", *requesterID)
+	}
 
-	// 拼邮件链接 + 发送
 	approveLink := fmt.Sprintf("%s/approve/%s", s.baseURL, token)
 	subject := fmt.Sprintf("[xdp-ban] 审批请求:%s", req.Target)
-	body := fmt.Sprintf(`您收到一条 xdp-ban 审批请求，请点击下方链接审批（10 分钟内有效）:
+	body := fmt.Sprintf(`您收到一条 xdp-ban 审批请求，请点击下方链接审批（%s 内有效）:
 
 目标: %s
 原因: %s
-提交者: (requester ID %d)
+提交者: %s
 
-批准链接:
+审批链接:
 %s
 
 此链接一次性，用后失效。
-`, req.Target, req.Reason, *req.RequestedByID, approveLink)
+`, TokenTTL, req.Target, req.Reason, requester, approveLink)
 
 	if err := s.mailSend(approver.Email, subject, body); err != nil {
-		log.Printf("send approval mail to %s: %v", approver.Email, err)
-		// 不中断流程,日志记录即可
+		// 邮件失败不回滚令牌:审批人仍可在界面里处理,链接也仍然有效
+		log.Printf("发送审批邮件到 %s 失败: %v", approver.Email, err)
+		_ = model.WriteAudit(s.db, requesterID, "mail", "ApprovalToken",
+			fmt.Sprint(approvalToken.ID), "mail_failed", err.Error())
+		return nil
 	}
 
-	model.WriteAudit(s.db, req.RequestedByID, "mail", "ApprovalToken", fmt.Sprint(approvalToken.ID), "mail_sent", approver.Email)
+	_ = model.WriteAudit(s.db, requesterID, "mail", "ApprovalToken",
+		fmt.Sprint(approvalToken.ID), "mail_sent", approver.Email)
 	return nil
 }
 
