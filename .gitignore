@@ -32,3 +32,4 @@ TESTING.md
 .DS_Store
 .idea/
 .vscode/
+*.test

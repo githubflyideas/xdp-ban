@@ -45,28 +45,37 @@ func (b *sampleBuffer) Latest() (SampleReport, bool) {
 
 // TopFlows 按包数聚合最近 window 内的流,返回前 n 条。
 // 用于仪表板"当前最吵的来源"视图。
+//
+// 聚合在读锁下进行,复杂度 O(reports × flows)。缓冲容量固定(默认 64 份),
+// 单份流数由采样器上报间隔决定,因此这是有界工作量;基准见 BenchmarkTopFlows。
+// key 用定长数组而非字符串拼接,避免每条流一次堆分配。
 func (b *sampleBuffer) TopFlows(window time.Duration, n int) []FlowSample {
 	cutoff := time.Now().Add(-window).Unix()
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	agg := map[string]*FlowSample{}
-	for _, r := range b.reports {
+	type flowKey struct {
+		src, dst, proto string
+	}
+	agg := make(map[flowKey]*FlowSample, 256)
+	for i := range b.reports {
+		r := &b.reports[i]
 		if r.Timestamp < cutoff {
 			continue
 		}
-		for _, f := range r.Flows {
-			key := f.SrcIP + "|" + f.DstIP + "|" + f.Proto
-			if cur, ok := agg[key]; ok {
+		for j := range r.Flows {
+			f := &r.Flows[j]
+			k := flowKey{f.SrcIP, f.DstIP, f.Proto}
+			if cur, ok := agg[k]; ok {
 				cur.PktCount += f.PktCount
 				cur.ByteCount += f.ByteCount
 				if f.LastSeen > cur.LastSeen {
 					cur.LastSeen = f.LastSeen
 				}
 			} else {
-				cp := f
-				agg[key] = &cp
+				cp := *f
+				agg[k] = &cp
 			}
 		}
 	}

@@ -42,7 +42,27 @@ dist:
 ## test: 全量单元测试(含竞态检测)
 .PHONY: test
 test:
-	go test -race ./...
+	CGO_ENABLED=1 go test -race ./...
+
+## bench: 运行基准测试(含内存分配统计)
+.PHONY: bench
+bench:
+	go test -bench=. -benchmem -run='^$$' ./...
+
+## fuzz: 对信任边界的解析函数各跑 30s 模糊测试
+.PHONY: fuzz
+fuzz:
+	go test -run='^$$' -fuzz='^FuzzParseTarget$$' -fuzztime=30s ./cmd/xdp-agent/
+	go test -run='^$$' -fuzz='^FuzzParseRate$$'   -fuzztime=30s ./internal/web/
+
+## prof: 采集 TopFlows 热路径的 CPU/内存 profile 到 dist/prof/
+.PHONY: prof
+prof:
+	@mkdir -p $(DIST)/prof
+	go test -bench=BenchmarkTopFlows -run='^$$' \
+	  -cpuprofile=$(DIST)/prof/cpu.out \
+	  -memprofile=$(DIST)/prof/mem.out ./internal/web/
+	@echo "分析: go tool pprof -http=:0 $(DIST)/prof/cpu.out"
 
 ## cover: 生成覆盖率报告
 .PHONY: cover
