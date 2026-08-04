@@ -4,6 +4,7 @@
 // 1. 加载嵌入的 eBPF bytecode 到采样网卡
 // 2. 管理采样率(用户态可修改 BPF map)
 // 3. 读 ringbuf 事件 → 聚合 → 上报
+// 4. 提供 HTTP API 供 xdp-ban 控制采样率
 //
 // 部署: 拷贝单个二进制即可运行(需 root)
 package main
@@ -17,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -58,14 +60,21 @@ type ReportPayload struct {
 	GlobalStat map[string]interface{} `json:"global_stat"`
 }
 
+// 全局状态
+var (
+	currentRateMap *ebpf.Map
+	currentRate    = 100
+)
+
 func main() {
 	device := flag.String("d", "eth1", "采样网卡")
 	xdpbanURL := flag.String("url", "http://localhost:8080/api/v1/samples", "xdp-ban 上报端点")
 	samplingN := flag.Int("n", 100, "采样率 1/N")
 	reportInterval := flag.Duration("interval", 10*time.Second, "上报间隔")
+	httpPort := flag.String("p", ":9090", "HTTP API 监听端口")
 	flag.Parse()
 
-	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d\n", *device, *samplingN)
+	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d, http_port=%s\n", *device, *samplingN, *httpPort)
 
 	// 1. 加载嵌入的 eBPF bytecode
 	reader := bytes.NewReader(xdpSamplerBytecode)
@@ -83,18 +92,23 @@ func main() {
 	// 2. 修改采样率(运行时配置)
 	rateMap := coll.Maps["sampling_rate"]
 	if rateMap != nil {
+		currentRateMap = rateMap
 		idx := uint32(0)
 		if err := rateMap.Put(idx, uint32(*samplingN)); err != nil {
 			log.Fatalf("set sampling rate: %v", err)
 		}
 		log.Printf("✓ 采样率已设置: 1/%d (可运行时修改)", *samplingN)
-		log.Printf("  修改采样率: bpftool map update name sampling_rate key 0 0 0 0 value <N> 0 0 0")
+		currentRate = *samplingN
 	}
 
-	// 3. 挂载 XDP prog
-	log.Printf("XDP prog 已加载(需 root 权限挂载到 %s):", *device)
-	log.Printf("  ip link set dev %s xdp obj <path> section xdp", *device)
-	log.Printf("")
+	// 3. 启动 HTTP API 服务(用于 xdp-ban 控制)
+	go func() {
+		log.Printf("HTTP API 监听: %s", *httpPort)
+		http.HandleFunc("/api/sampling/rate", handleSamplingRate)
+		if err := http.ListenAndServe(*httpPort, nil); err != nil {
+			log.Fatalf("http listen: %v", err)
+		}
+	}()
 
 	// 4. 读 ringbuf → 上报
 	rd, err := ringbuf.NewReader(coll.Maps["samples"])
@@ -113,7 +127,7 @@ func main() {
 		case <-ticker.C:
 			// 上报周期到
 			if len(flowStats) > 0 {
-				reportSamples(*xdpbanURL, *device, *samplingN, flowStats)
+				reportSamples(*xdpbanURL, *device, currentRate, flowStats)
 				flowStats = make(map[string]*FlowSample) // 清空
 			}
 
@@ -153,6 +167,40 @@ func main() {
 			}
 		}
 	}
+}
+
+// handleSamplingRate HTTP API: 修改采样率
+func handleSamplingRate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rateStr := r.FormValue("rate")
+	if rateStr == "" {
+		http.Error(w, "rate required", http.StatusBadRequest)
+		return
+	}
+
+	rate, err := strconv.Atoi(rateStr)
+	if err != nil || rate < 1 {
+		http.Error(w, "invalid rate", http.StatusBadRequest)
+		return
+	}
+
+	// 更新 eBPF map
+	if currentRateMap != nil {
+		idx := uint32(0)
+		if err := currentRateMap.Put(idx, uint32(rate)); err != nil {
+			http.Error(w, fmt.Sprintf("update map: %v", err), http.StatusInternalServerError)
+			return
+		}
+		currentRate = rate
+		log.Printf("✓ 采样率已更新: 1/%d", rate)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "rate": rate})
 }
 
 func reportSamples(url, device string, samplingN int, flows map[string]*FlowSample) {

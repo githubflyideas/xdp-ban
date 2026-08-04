@@ -43,6 +43,10 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
 		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
 
+		// 采样管理(新增)
+		auth.GET("/sampling", h.requireCap(policy.DashboardView), h.samplingConfig)
+		auth.POST("/api/sampling/rate", h.requireCap(policy.SystemConfig), h.setSamplingRate)
+
 		// 用户管理(admin only)
 		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
 		auth.POST("/users/:id/password", h.requireCap(policy.UserManage), h.userChangePassword)
@@ -245,6 +249,45 @@ func (h *Handler) auditLog(c *gin.Context) {
 	c.HTML(http.StatusOK, "audit.html", gin.H{
 		"u": u, "nav": policy.NavSections(u.Role), "logs": logs,
 	})
+}
+
+// ---- 采样管理 ----
+func (h *Handler) samplingConfig(c *gin.Context) {
+	u := h.currentUser(c)
+	c.HTML(http.StatusOK, "sampling.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"canConfigure": policy.Allow(u.Role, policy.SystemConfig),
+	})
+}
+
+func (h *Handler) setSamplingRate(c *gin.Context) {
+	u := h.currentUser(c)
+	rate := c.PostForm("rate")
+	if rate == "" {
+		c.JSON(400, gin.H{"error": "rate required"})
+		return
+	}
+
+	// 转发到 xdp-sampler 的 HTTP API
+	samplerURL := c.PostForm("sampler_url")
+	if samplerURL == "" {
+		samplerURL = "http://localhost:9090"  // 默认
+	}
+
+	// 调用 xdp-sampler /api/sampling/rate
+	resp, err := http.PostForm(samplerURL+"/api/sampling/rate", map[string][]string{
+		"rate": {rate},
+	})
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	// 审计
+	model.WriteAudit(h.db, &u.ID, u.Label(), "SamplingConfig", "1", "rate_changed", rate)
+
+	c.JSON(200, gin.H{"ok": true, "rate": rate})
 }
 
 // ---- 对外审批(占位;完整六铁律逻辑复用 internal/approval)----

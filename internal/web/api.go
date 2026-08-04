@@ -31,20 +31,6 @@ func RegisterAPI(r *gin.Engine, db *gorm.DB) {
 	}
 }
 
-func apiAuth(db *gorm.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 简单 token 认证(生产改成 mTLS 或 OAuth)
-		token := c.GetHeader("X-API-Key")
-		if token == "" {
-			c.JSON(401, gin.H{"error": "missing api key"})
-			c.Abort()
-			return
-		}
-		// TODO: 验证 token
-		c.Next()
-	}
-}
-
 func getDispatchPending(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var dispatches []model.Dispatch

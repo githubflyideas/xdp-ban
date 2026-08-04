@@ -12,6 +12,7 @@ func templates() *template.Template {
 	template.Must(t.New("bans.html").Parse(bansTpl))
 	template.Must(t.New("ban_new.html").Parse(banNewTpl))
 	template.Must(t.New("ban_detail.html").Parse(banDetailTpl))
+	template.Must(t.New("sampling.html").Parse(samplingTpl))
 	template.Must(t.New("users.html").Parse(usersTpl))
 	template.Must(t.New("audit.html").Parse(auditTpl))
 	template.Must(t.New("error.html").Parse(errTpl))
@@ -46,7 +47,7 @@ input,select{width:100%;padding:8px 10px;border:1px solid #c3ccd9;border-radius:
 
 const navTpl = `<div class="topbar"><span class="brand">XDP<b>-ban</b></span><span class="spacer"></span>
 <span class="who">{{.u.Username}}<span class="role">{{.u.Role}}</span></span><a href="/logout">退出</a></div>
-<div class="shell"><aside class="side">{{range .nav}}<a href="/{{if eq .Key "dashboard"}}dashboard{{else if eq .Key "bans"}}bans{{else}}{{.Key}}{{end}}">{{.Label}}</a>{{end}}</aside><main class="main">`
+<div class="shell"><aside class="side">{{range .nav}}<a {{if eq .Key "sampling"}}href="/sampling"{{else if eq .Key "dashboard"}}href="/dashboard"{{else if eq .Key "bans"}}href="/bans"{{else if eq .Key "users"}}href="/users"{{else if eq .Key "audit"}}href="/audit"{{else}}href="/{{.Key}}"{{end}}">{{.Label}}</a>{{end}}</aside><main class="main">`
 
 const loginTpl = `<!doctype html><html><head><meta charset="utf-8"><title>xdp-ban</title>{{template "_head"}}</head>
 <body><div style="max-width:360px;margin:9vh auto">
@@ -120,6 +121,50 @@ const auditTpl = `<!doctype html><html><head><meta charset="utf-8"><title>审计
 {{range .logs}}<tr><td>{{.OccurredAt.Format "01-02 15:04:05"}}</td><td>{{.ActorLabel}}</td>
 <td>{{.EntityType}}#{{.EntityID}}</td><td>{{.Event}}</td></tr>
 {{end}}</tbody></table></div>
+</main></div></body></html>`
+
+const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采样配置 · xdp-ban</title>{{template "_head"}}</head>
+<body>` + navTpl + `<h1>采样配置</h1>
+<div class="card" style="max-width:500px"><div class="bd">
+<p style="color:#67748a">实时调整 XDP 采样率(1/N packet sampling)</p>
+<form id="samplingForm" style="margin-top:18px">
+<label>采样比率 (1/N)</label>
+<input type="number" id="samplingRate" name="rate" value="100" min="1" max="10000" placeholder="100">
+<small style="display:block;color:#98a2b3;margin-top:4px">例如: 100 = 采样 1/100 的包</small>
+
+<label style="margin-top:14px">采样器地址</label>
+<input type="text" id="samplerURL" name="sampler_url" value="http://localhost:9090" placeholder="http://localhost:9090">
+
+<div style="margin-top:18px"><button class="btn primary" type="button" onclick="setSamplingRate()">立即应用</button></div>
+</form>
+
+<div id="result" style="margin-top:14px"></div>
+</div></div>
+
+<script>
+function setSamplingRate() {
+  const rate = document.getElementById('samplingRate').value;
+  const samplerURL = document.getElementById('samplerURL').value;
+  const resultDiv = document.getElementById('result');
+
+  fetch('/api/sampling/rate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'rate=' + encodeURIComponent(rate) + '&sampler_url=' + encodeURIComponent(samplerURL)
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      resultDiv.innerHTML = '<div class="flash" style="background:#e8f5e9;border:1px solid #c8e6c9;color:#2e7d32">✓ 采样率已更新: 1/' + rate + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="flash err">' + data.error + '</div>';
+    }
+  })
+  .catch(e => {
+    resultDiv.innerHTML = '<div class="flash err">错误: ' + e.message + '</div>';
+  });
+}
+</script>
 </main></div></body></html>`
 
 const errTpl = `<!doctype html><html><head><meta charset="utf-8"><title>xdp-ban</title>{{template "_head"}}</head>
