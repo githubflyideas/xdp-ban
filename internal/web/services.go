@@ -11,6 +11,36 @@ import (
 	"github.com/xdpban/xdp-ban/internal/safety"
 )
 
+// restoreQuota 启动时从数据库恢复配额占用。
+//
+// 不恢复的话:重启后 Tracker 归零,用户会看到"表项全空"的假象,
+// 于是继续批量导入,直到内核 map 真的满了才失败 —— 而那时的失败
+// 是 E2BIG,规则静默不生效。
+//
+// 统计范围必须与 Reserve 的时机一致:额度在**提交时**(pending)就预占,
+// 所以这里也要把 pending 算进来,否则重启后待审批的规则会凭空释放额度,
+// 导致超额批准。
+func (h *Handler) restoreQuota() {
+	live := []string{"pending", "active"}
+
+	var agg struct {
+		Prefixes int
+		Rules    int
+	}
+	h.db.Model(&model.ScopedBan{}).
+		Where("state IN ?", live).
+		Select("COALESCE(SUM(prefix_count),0) as prefixes, COUNT(*) as rules").
+		Scan(&agg)
+
+	var targets int64
+	h.db.Model(&model.ScopedBan{}).
+		Where("state IN ?", live).
+		Distinct("target_ip").
+		Count(&targets)
+
+	h.quota.SetBaseline(agg.Prefixes, agg.Rules, int(targets))
+}
+
 // guard 构造安全兜底层:硬编码环回等 + DB 中的保护集。
 //
 // 每次调用都重新从 DB 读一遍,而不是缓存单例——保护集是运维随时会改的

@@ -17,6 +17,7 @@ import (
 
 	"github.com/xdpban/xdp-ban/internal/model"
 	"github.com/xdpban/xdp-ban/internal/policy"
+	"github.com/xdpban/xdp-ban/internal/prefixdb"
 	"github.com/xdpban/xdp-ban/internal/web"
 )
 
@@ -34,6 +35,22 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	seed(db)
+
+	// 前缀库是可选的:没有它,按国家/AS 封禁功能在界面上提示未导入,
+	// 其余功能照常。不因缺少一个可选数据文件而拒绝启动。
+	if p := os.Getenv("XDPBAN_PREFIX_DB"); p != "" {
+		pdb, err := prefixdb.Load(p)
+		if err != nil {
+			log.Printf("加载前缀库失败(范围封禁功能将不可用): %v", err)
+		} else {
+			prefixdb.SetGlobal(pdb)
+			st := pdb.Stats()
+			log.Printf("前缀库已加载: %d 条区间, %d 个国家, %d 个 AS",
+				st.Entries, st.Countries, st.ASNs)
+		}
+	} else {
+		log.Printf("未设置 XDPBAN_PREFIX_DB,按国家/AS 封禁功能不可用")
+	}
 
 	r := gin.New()
 	r.Use(gin.Recovery())

@@ -129,6 +129,75 @@ type BanLadder struct {
 	UpdatedAt    time.Time
 }
 
+// ScopedBan 范围封禁规则:按国家 / AS 选择源地址范围,保护单台目标主机。
+//
+// 关键设计:**不逐条存储展开后的前缀**。
+// 一个国家可展开成上万条 CIDR,逐条落库会让单次操作产生上万行,
+// DB 膨胀、审批列表不可读、下发变慢。这里只存"选择器 + 展开数量",
+// 前缀在下发时由 prefixdb 重新展开。代价是前缀库更新后同一规则的
+// 展开结果可能变化 —— 这是想要的行为(封禁跟随 BGP 现实),
+// 但必须记录 ResolvedAt 与 PrefixCount 以便发现漂移。
+type ScopedBan struct {
+	ID uint `gorm:"primaryKey"`
+
+	// 目标:只允许单台主机(/32)。见 bpf/xdp_filter.c 的说明 ——
+	// 目标带前缀会让二维最长匹配无法用 LPM_TRIE 表达。
+	TargetIP string `gorm:"index;not null"`
+
+	// 源范围选择器
+	Country string `gorm:"index"` // ISO alpha-2,空 = 不限
+	ASN     uint32 `gorm:"index"` // 0 = 不限
+
+	// 展开结果的记账(用于配额、界面展示、漂移检测)
+	PrefixCount int   `gorm:"not null"`
+	AddressCount uint64 `gorm:"not null"`
+	ResolvedAt  time.Time
+
+	Reason     string
+	State      string `gorm:"index;not null;default:pending"` // pending/active/rejected/expired/revoked
+	TTLSeconds *int64
+
+	RequestedByID *uint
+	ApprovedByID  *uint
+	// OverrideAck 记录管理员是否显式确认了"影响面过大"的警告。
+	// 这是审计要点:大范围封禁必须能追溯到某人明确点过确认。
+	OverrideAck bool `gorm:"not null;default:false"`
+
+	EffectiveAt *time.Time
+	ExpiresAt   *time.Time
+	RevokedAt   *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// Label 供界面与审计展示
+func (s *ScopedBan) Label() string {
+	scope := "任意源"
+	switch {
+	case s.Country != "" && s.ASN != 0:
+		scope = s.Country + "/AS" + itoa64(uint64(s.ASN))
+	case s.Country != "":
+		scope = s.Country
+	case s.ASN != 0:
+		scope = "AS" + itoa64(uint64(s.ASN))
+	}
+	return scope + " → " + s.TargetIP
+}
+
+func itoa64(v uint64) string {
+	if v == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for v > 0 {
+		i--
+		b[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(b[i:])
+}
+
 // Open 打开数据库并迁移。path 为 .db 文件路径。
 //
 // SQLite 调优说明(这些不是可选项,少一个就会在并发下出问题):
@@ -176,7 +245,7 @@ func Open(path string) (*gorm.DB, error) {
 
 	if err := db.AutoMigrate(
 		&User{}, &BanRequest{}, &Dispatch{}, &AuditLog{},
-		&ApprovalToken{}, &ProtectedTarget{}, &BanLadder{},
+		&ApprovalToken{}, &ProtectedTarget{}, &BanLadder{}, &ScopedBan{},
 	); err != nil {
 		return nil, err
 	}

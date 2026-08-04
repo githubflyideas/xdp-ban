@@ -5,7 +5,19 @@ import "html/template"
 // templates 返回内嵌的全部页面模板(FortiMail 风格企业控制台)。
 // 内嵌进二进制 —— 单文件部署,无外部模板文件。
 func templates() *template.Template {
-	t := template.New("")
+	// 模板函数:界面里需要做少量算术(水位条宽度、余量),
+	// 在 Go 里算好再传更啰嗦,这里给两个最小助手。
+	funcs := template.FuncMap{
+		"divPPM": func(ppm int) int { // 百万分之 → 百分之
+			p := ppm / 10000
+			if p > 100 {
+				return 100
+			}
+			return p
+		},
+		"sub": func(a, b int) int { return a - b },
+	}
+	t := template.New("").Funcs(funcs)
 	template.Must(t.New("_head").Parse(headTpl))
 	template.Must(t.New("login.html").Parse(loginTpl))
 	template.Must(t.New("dashboard.html").Parse(dashTpl))
@@ -13,6 +25,8 @@ func templates() *template.Template {
 	template.Must(t.New("ban_new.html").Parse(banNewTpl))
 	template.Must(t.New("ban_detail.html").Parse(banDetailTpl))
 	template.Must(t.New("sampling.html").Parse(samplingTpl))
+	template.Must(t.New("scoped_new.html").Parse(scopedNewTpl))
+	template.Must(t.New("scoped_list.html").Parse(scopedListTpl))
 	template.Must(t.New("users.html").Parse(usersTpl))
 	template.Must(t.New("audit.html").Parse(auditTpl))
 	template.Must(t.New("error.html").Parse(errTpl))

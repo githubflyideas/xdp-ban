@@ -16,12 +16,14 @@ import (
 	"github.com/xdpban/xdp-ban/internal/approval"
 	"github.com/xdpban/xdp-ban/internal/model"
 	"github.com/xdpban/xdp-ban/internal/policy"
+	"github.com/xdpban/xdp-ban/internal/quota"
 )
 
 type Handler struct {
 	db        *gorm.DB
 	approvals *approval.Service
 	sessions  *sessionStore
+	quota     *quota.Tracker
 	// samplerURL 是 xdp-sampler 的控制端点,用于下发采样率
 	samplerURL string
 }
@@ -35,8 +37,10 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		db:         db,
 		approvals:  approval.NewService(db, baseURL),
 		sessions:   newSessionStore(sessionTTL),
+		quota:      quota.NewTracker(),
 		samplerURL: envOr("XDPBAN_SAMPLER_URL", "http://localhost:9090"),
 	}
+	h.restoreQuota()
 	r.SetHTMLTemplate(templates())
 
 	r.GET("/login", h.loginPage)
@@ -61,9 +65,19 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
 		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
 
-		// 采样管理(新增)
+		// 采样管理
 		auth.GET("/sampling", h.requireCap(policy.DashboardView), h.samplingConfig)
 		auth.POST("/api/sampling/rate", h.requireCap(policy.SystemConfig), h.setSamplingRate)
+
+		// 范围封禁(按国家 / AS 选源,目标限单主机)
+		auth.GET("/scoped", h.requireCap(policy.BanRequestView), h.scopedBanList)
+		auth.GET("/scoped/new", h.requireCap(policy.BanRequestCreate), h.scopedBanNew)
+		auth.POST("/scoped", h.requireCap(policy.BanRequestCreate), h.scopedBanCreate)
+		auth.GET("/scoped/asn-search", h.requireCap(policy.BanRequestCreate), h.scopedASNSearch)
+		auth.POST("/scoped/preview", h.requireCap(policy.BanRequestCreate), h.scopedPreview)
+		auth.POST("/scoped/:id/approve", h.requireCap(policy.BanRequestApprove), h.scopedBanApprove)
+		auth.POST("/scoped/:id/reject", h.requireCap(policy.BanRequestReject), h.scopedBanReject)
+		auth.POST("/scoped/:id/revoke", h.requireCap(policy.UnbanExecute), h.scopedBanRevoke)
 
 		// 用户管理(admin only)
 		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
