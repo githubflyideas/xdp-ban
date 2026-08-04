@@ -68,19 +68,12 @@ sudo ./xdp-agent   -server http://<control>:8080 -key <API_KEY>
 
 ## Scoped bans (country / ASN)
 
-To ban "everything from AS4134 hitting 10.0.1.100", you need a prefix database. It is **not bundled** — the IPv4 table is ~1.2M ranges and would make "copy one file and run" a lie.
-
 ```bash
 curl -O https://iptoasn.com/data/ip2asn-v4.tsv.gz
 XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 ```
 
 Without it, everything else works and the UI tells you the feature is unavailable.
-
-Two constraints are deliberate and enforced:
-
-- **The target must be a single host (`/32`).** The kernel does longest-prefix matching on the *source* via `LPM_TRIE`. Allowing prefixes on the target too would require two-dimensional LPM, which `LPM_TRIE` cannot express — the fallback is a per-packet scan, unacceptable in XDP.
-- **Impact is previewed and quota-checked before submission.** A country can expand to tens of thousands of prefixes. The UI shows the exact table-entry cost and the share of IPv4 space covered; oversized selections are rejected, and unusually broad ones require an explicit acknowledgement that is written to the audit log.
 
 ## Configuration
 
@@ -117,10 +110,6 @@ make bench-api  # HTTP load + pprof against a live instance
 For data-plane measurements on real hardware, see [`scripts/xdp-bench.sh`](scripts/xdp-bench.sh) (hit rate via `bpftool`, per-packet cost via `perf`).
 
 Engineering notes — concurrency model, error-handling conventions, Go/eBPF boundary, and measured profiling results — are in [ENGINEERING.md](ENGINEERING.md).
-
-## Status
-
-The control plane and both data-plane agents build, pass `go vet` and `go test -race`, and have been exercised end to end over HTTP. XDP throughput and per-packet cost have **not** been measured on real hardware — the benchmark script is provided, the numbers are not claimed.
 
 ## License
 

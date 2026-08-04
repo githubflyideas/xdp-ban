@@ -68,19 +68,12 @@ sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 
 ## 范围封禁(按国家 / AS)
 
-要实现"封掉 AS4134 打向 10.0.1.100 的全部流量",需要一份 IP 前缀库。它**不打进二进制** —— IPv4 表约 120 万条区间,嵌进去会让"拷一个文件就能跑"变成谎言。
-
 ```bash
 curl -O https://iptoasn.com/data/ip2asn-v4.tsv.gz
 XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 ```
 
 未配置时其余功能照常,界面会提示该功能不可用。
-
-两条约束是刻意的,且在后端强制:
-
-- **目标必须是单台主机(`/32`)。** 内核用 `LPM_TRIE` 对*源前缀*做最长匹配。若目标也允许前缀,就变成二维最长匹配 —— `LPM_TRIE` 表达不了,只能退化成每包遍历,这在 XDP 里不可接受。
-- **提交前必须预览影响面并通过配额校验。** 一个国家可展开成上万条前缀。界面会给出确切的表项开销与覆盖的 IPv4 空间占比;超限的选择直接拒绝,范围异常大的需要显式勾选确认,该确认会写入审计。
 
 ## 配置
 
@@ -117,10 +110,6 @@ make bench-api  # 对运行中的实例施加 HTTP 负载并采 pprof
 数据面真机测量见 [`scripts/xdp-bench.sh`](scripts/xdp-bench.sh)(用 `bpftool` 读命中率,用 `perf` 看每包开销)。
 
 工程说明 —— 并发模型、错误处理规范、Go/eBPF 边界、实测的 profiling 结果 —— 见 [ENGINEERING.md](ENGINEERING.md)。
-
-## 现状
-
-控制面与两个数据面程序均可编译,通过 `go vet` 与 `go test -race`,并已通过 HTTP 做过端到端验证。XDP 吞吐与每包开销**尚未**在真实网卡上测量 —— 压测脚本已提供,但不声称任何数据。
 
 ## 许可证
 
