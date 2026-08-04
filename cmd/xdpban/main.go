@@ -41,6 +41,12 @@ func main() {
 	web.Register(r, db)
 	web.RegisterAPI(r, db)
 
+	// pprof 默认关闭:暴露内存布局与 goroutine 栈,只在排查时开
+	if web.PprofEnabled() {
+		web.RegisterPprof(r)
+		log.Printf("pprof 已启用: %s/debug/pprof/ (务必仅绑定内网)", addr)
+	}
+
 	log.Printf("xdp-ban listening on %s (db=%s)", addr, dbPath)
 	if err := r.Run(addr); err != nil {
 		log.Fatal(err)

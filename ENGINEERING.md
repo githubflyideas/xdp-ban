@@ -135,5 +135,89 @@ BenchmarkTopFlows/flows=500   1,396,462 ns/op      82,112 B/op      262 allocs/o
 - XDP 每包开销:`xdp-bench` 或 `pktgen` 打流,看线速下 pps 与 CPU。
 - 流量回放:`tcpreplay` 灌镜像流量到采样网卡,验证 1/N 采样比与上报聚合准确性。
 
-诚实结论:**用户态路径已 profile 并优化;数据面(内核)性能目前是"设计上正确 + 逻辑单测覆盖",
-真机压测数据尚缺**,因为需要物理网卡与 root,不在当前构建环境能力内。
+## 6. 并发安全:Gin × SQLite × eBPF
+
+三条并发路径,各自的保护手段不同。
+
+### Gin handler 之间的共享状态
+
+**修复过的真实缺陷**:会话表原本是裸 `map[string]uint`。Gin 每请求一个 goroutine,
+并发登录会触发 `fatal error: concurrent map writes` ——**这个 panic 无法 recover,
+进程直接退出**,等于一个可远程触发的拒绝服务(多人同时点登录即可)。
+
+`TestSessionStore_ConcurrentLoginAndAccess` 在 `-race` 下确认过这个竞争(修复前报
+DATA RACE,修复后干净)。现在是 `internal/web/session.go` 的 `sessionStore`:
+`RWMutex` + 过期时间 + 后台 reaper 清理僵尸会话。顺带补上两个安全缺口:
+登出真正吊销 token(并清 cookie)、改密码吊销该用户全部会话。
+
+### SQLite
+
+`internal/model/model.go` 的 `Open()` 做了四件事,每一件都对应一个具体故障:
+
+| 设置 | 不做会怎样 |
+|------|-----------|
+| `journal_mode=WAL` | 默认模式下写事务阻塞所有读:一次审批写卡住全部仪表板查询 |
+| `busy_timeout=5000` | 并发写直接返回 `SQLITE_BUSY`,表现为随机 "database is locked" 500 |
+| `synchronous=NORMAL` | FULL 每事务 fsync,写延迟显著上升;NORMAL 是 WAL 下的常规折中 |
+| 连接池 `MaxOpen=8` | SQLite 是单文件嵌入库,连接堆高只把争抢从 Go 层挪到文件锁层 |
+
+`Open()` 会**回读 `PRAGMA journal_mode` 校验 WAL 真的生效** —— DSN pragma 名写错时
+驱动静默忽略,不验证就会以为开了其实没开,问题拖到生产才炸。
+`TestOpen_ConcurrentReadWriteNoLockError` 用 8 写 + 8 读混合负载守住这条。
+
+**事务**:只在需要原子性的地方显式用 `db.Transaction` —— 审批令牌的
+"标记已用 + 推进状态"必须同生共死,否则重放窗口打开。
+其余单条写用 `SkipDefaultTransaction` 免掉 GORM 默认的多余 BEGIN/COMMIT。
+
+### eBPF Map
+
+内核侧 HASH map 的单键更新本身原子,C 侧计数用 `__sync_fetch_and_add`,
+用户态各键独立 `Put` 无需额外锁。采样率的 Go 侧副本用 `RWMutex` 保护,
+且**以 eBPF map 为唯一事实源**:先写 map 成功才更新副本。
+
+---
+
+## 7. 全链路 Profiling 与优化结果
+
+`scripts/api-bench.sh` 打真实 HTTP 负载并**在负载期间**采 pprof
+(踩过的坑:先后串行采集会得到全零 profile)。pprof 端点默认关闭,
+需 `XDPBAN_PPROF=1`,因为它会暴露内存布局与 goroutine 栈。
+
+### pprof 定位并修掉的两处
+
+**① SQL 反复解析(GORM/SQLite 层)**
+
+初次 CPU profile 显示 `modernc.org/sqlite/lib.yy_reduce` 占 ~17%,
+`gorm.(*processor).Execute` 累计 42% —— 每次查询都在重新解析同样的 SQL。
+开启 `PrepareStmt: true` 后语句只解析一次,`yy_reduce` 从 Top10 消失。
+
+`BenchmarkWriteAudit`(最高频写路径):`122,706 ns/op / 109 allocs`
+→ `109,783 ns/op / 81 allocs`,**延迟 −11%,分配 −26%**。
+
+**② 采样聚合的字符串 key(见第 3 节)**
+
+`TopFlows` 延迟 −61%、分配次数 −99%。
+
+### 各阶段延迟归属(本机实测)
+
+| 阶段 | 量级 | 依据 |
+|------|------|------|
+| XDP 收包 → DROP | 亚微秒(未真机实测) | 无循环无分配,单次 map 查表 |
+| eBPF map 更新(agent) | 常驻进程 fd 复用,µs 级 | `bpftool` 单次往返是上界,见压测脚本 |
+| SQLite 单写(审计) | ~110 µs | `BenchmarkWriteAudit` |
+| 仪表板 3× count | ~173 µs | `BenchmarkDashboardCounts` |
+| 采样聚合 TopFlows | ~1.4 ms(64×500 流满载) | `BenchmarkTopFlows` |
+| Gin 端到端 | 9–13 ms | `api-bench.sh`(含 curl 进程启动开销,非纯服务端) |
+
+**结论:控制面瓶颈在 SQLite,不在 Gin。** Mutex profile 未见 `sessionStore` 或
+`sqlite` 相关争用条目(只有 runtime 内部锁),说明当前锁粒度不是瓶颈。
+Block profile 中 `internal/poll.(*fdMutex).rwlock` 占比高,来源是 `gin.Logger()`
+往同一 stdout 写日志 —— 生产环境应关掉访问日志或改异步写。
+
+### 还没做的
+
+XDP 侧每包开销与命中率需真机(见下)。`scripts/xdp-bench.sh` 已写好,
+在有网卡的机器上 `sudo ./scripts/xdp-bench.sh --iface eth0` 即可采数:
+`bpftool` 读 map/counters 算命中率、`perf record` 抓内核侧 `bpf_prog_run` 占比、
+`tcpreplay` 回放验证 1/N 采样准确性。**这部分我没有数据,不编。**
+

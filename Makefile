@@ -49,6 +49,17 @@ test:
 bench:
 	go test -bench=. -benchmem -run='^$$' ./...
 
+## bench-api: 控制面压测(Gin 吞吐/延迟 + pprof 采集)
+.PHONY: bench-api
+bench-api: build
+	./scripts/api-bench.sh
+
+## bench-xdp: 数据面真机压测(需 root:XDP 命中率、Map 延迟、perf)
+.PHONY: bench-xdp
+bench-xdp:
+	@echo "需要 root 与真实网卡,例:"
+	@echo "  sudo ./scripts/xdp-bench.sh --iface eth0 --duration 30"
+
 ## fuzz: 对信任边界的解析函数各跑 30s 模糊测试
 .PHONY: fuzz
 fuzz:

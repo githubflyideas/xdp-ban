@@ -21,18 +21,20 @@ import (
 type Handler struct {
 	db        *gorm.DB
 	approvals *approval.Service
+	sessions  *sessionStore
 	// samplerURL 是 xdp-sampler 的控制端点,用于下发采样率
 	samplerURL string
 }
 
-// 极简会话:内存 token→userID(单机单实例;生产可换 cookie 签名/Redis)
-var sessions = map[string]uint{}
+// sessionTTL 会话有效期,与 cookie Max-Age 保持一致
+const sessionTTL = 8 * time.Hour
 
 func Register(r *gin.Engine, db *gorm.DB) {
 	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
 	h := &Handler{
 		db:         db,
 		approvals:  approval.NewService(db, baseURL),
+		sessions:   newSessionStore(sessionTTL),
 		samplerURL: envOr("XDPBAN_SAMPLER_URL", "http://localhost:9090"),
 	}
 	r.SetHTMLTemplate(templates())
@@ -78,7 +80,7 @@ func (h *Handler) currentUser(c *gin.Context) *model.User {
 	if err != nil {
 		return nil
 	}
-	uid, ok := sessions[tok]
+	uid, ok := h.sessions.Get(tok)
 	if !ok {
 		return nil
 	}
@@ -119,18 +121,21 @@ func (h *Handler) doLogin(c *gin.Context) {
 		return
 	}
 	tok := randToken()
-	sessions[tok] = u.ID
-	c.SetCookie("sid", tok, 3600*8, "/", "", false, true)
+	h.sessions.Put(tok, u.ID)
+	// Secure 标志由部署形态决定:反代终止 TLS 时由 XDPBAN_COOKIE_SECURE 打开
+	secure := envOr("XDPBAN_COOKIE_SECURE", "") != ""
+	c.SetCookie("sid", tok, int(sessionTTL.Seconds()), "/", "", secure, true)
 	now := time.Now()
 	h.db.Model(&u).Update("last_login_at", now)
-	model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(u.ID), "login", "")
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(u.ID), "login", "")
 	c.Redirect(http.StatusFound, "/dashboard")
 }
 
 func (h *Handler) logout(c *gin.Context) {
 	if tok, err := c.Cookie("sid"); err == nil {
-		delete(sessions, tok)
+		h.sessions.Delete(tok)
 	}
+	c.SetCookie("sid", "", -1, "/", "", false, true)
 	c.Redirect(http.StatusFound, "/login")
 }
 
@@ -305,7 +310,9 @@ func (h *Handler) userChangePassword(c *gin.Context) {
 	}
 	_ = target.SetPassword(newPwd)
 	h.db.Model(&target).Update("password_hash", target.PasswordHash)
-	model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(target.ID), "password_changed", "")
+	// 改密必须吊销该用户已有会话,否则旧 cookie 仍然畅通
+	h.sessions.DeleteByUser(target.ID)
+	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(target.ID), "password_changed", "")
 	c.Redirect(http.StatusFound, "/users")
 }
 
