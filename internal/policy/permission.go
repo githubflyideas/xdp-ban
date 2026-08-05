@@ -69,7 +69,7 @@ func NavSections(role string) []NavSection {
 		{"dashboard", "Dashboard", DashboardView},
 		{"bans", "封禁请求", BanRequestView},
 		{"scoped", "范围封禁", BanRequestView},
-		{"sampling", "采样配置", SystemConfig},
+		{"sampling", "采样与流量", DashboardView},
 		{"prefixdb", "IP 库管理", SystemConfig},
 		{"audit", "审计日志", AuditView},
 		{"report", "合规报告", AuditView},

@@ -101,8 +101,9 @@ const banNewTpl = `<!doctype html><html><head><meta charset="utf-8"><title>新�
 <body>` + navTpl + `<h1>新建封禁请求</h1>
 <div class="card" style="max-width:460px"><div class="bd">
 {{if .err}}<div class="flash err">{{.err}}</div>{{end}}
-<form method="post" action="/bans"><label>目标 IP / CIDR</label><input name="target" placeholder="203.0.113.7 或 203.0.113.0/24" required>
-<label>原因</label><input name="reason" placeholder="ssh 爆破 / 恶意扫描" required>
+{{if .target}}<div class="flash" style="background:#eef4ff;border:1px solid #c3d4f0;color:#1e3050">已根据采样流量预填,请核对后提交审批。</div>{{end}}
+<form method="post" action="/bans"><label>目标 IP / CIDR</label><input name="target" value="{{.target}}" placeholder="203.0.113.7 或 203.0.113.0/24" required>
+<label>原因</label><input name="reason" value="{{.reason}}" placeholder="ssh 爆破 / 恶意扫描" required>
 <div style="margin-top:18px"><button class="btn primary">提交请求</button> <a class="btn" href="/bans">取消</a></div></form>
 </div></div></main></div></body></html>`
 
@@ -139,22 +140,37 @@ const auditTpl = `<!doctype html><html><head><meta charset="utf-8"><title>审计
 {{end}}</tbody></table></div>
 </main></div></body></html>`
 
-const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采样配置 · xdp-ban</title>{{template "_head"}}</head>
-<body>` + navTpl + `<h1>采样配置</h1>
-<div class="card" style="max-width:500px"><div class="bd">
-<p style="color:#67748a">实时调整 XDP 采样率(1/N packet sampling)</p>
-<form id="samplingForm" style="margin-top:18px">
+const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采样与流量 · xdp-ban</title>{{template "_head"}}</head>
+<body>` + navTpl + `<h1>采样与实时流量</h1>
+
+<div class="card" style="max-width:520px"><div class="hd">采样率</div><div class="bd">
+<p style="color:#67748a;margin-top:0">当前 <strong>1/{{.currentN}}</strong> 包采样。调小 N 看得更细,调大 N 更省。</p>
+{{if .canConfigure}}
+<form id="samplingForm">
 <label>采样比率 (1/N)</label>
-<input type="number" id="samplingRate" name="rate" value="100" min="1" max="10000" placeholder="100">
-<small style="display:block;color:#98a2b3;margin-top:4px">例如: 100 = 采样 1/100 的包</small>
-
+<input type="number" id="samplingRate" name="rate" value="{{.currentN}}" min="1" max="10000">
 <label style="margin-top:14px">采样器地址</label>
-<input type="text" id="samplerURL" name="sampler_url" value="http://localhost:9090" placeholder="http://localhost:9090">
-
+<input type="text" id="samplerURL" name="sampler_url" value="{{.samplerURL}}">
 <div style="margin-top:18px"><button class="btn primary" type="button" onclick="setSamplingRate()">立即应用</button></div>
 </form>
-
 <div id="result" style="margin-top:14px"></div>
+{{else}}<p style="color:#98a2b3">你的角色只能查看,调整采样率需要系统配置权限。</p>{{end}}
+</div></div>
+
+<div class="card"><div class="hd">近 5 分钟 Top 流量(采样观测)</div><div class="bd">
+<p style="color:#67748a;margin-top:0">最吵的源在最上面。看到异常源,直接点「封禁此源」发起治理流程 —— 目标已按流量方向预填。</p>
+<table><thead><tr><th>源地址</th><th>目标</th><th>协议</th><th>采样包数</th><th>采样字节</th><th></th></tr></thead><tbody>
+{{range .topFlows}}<tr>
+<td class="mono">{{.SrcIP}}{{if .SrcPort}}:{{.SrcPort}}{{end}}</td>
+<td class="mono">{{.DstIP}}{{if .DstPort}}:{{.DstPort}}{{end}}</td>
+<td>{{.Proto}}</td>
+<td>{{.PktCount}}</td>
+<td>{{.ByteCount}}</td>
+<td>
+{{if $.canBan}}<a class="btn danger" href="/bans/new?target={{.SrcIP}}&reason=采样观测:{{.SrcIP}} 高频打向 {{.DstIP}}({{.Proto}})">封禁此源</a>{{end}}
+</td></tr>
+{{else}}<tr><td colspan="6" style="color:#98a2b3">暂无采样数据。确认 xdp-sampler 正在运行并上报到本机 /api/v1/samples。</td></tr>
+{{end}}</tbody></table>
 </div></div>
 
 <script>
@@ -162,7 +178,6 @@ function setSamplingRate() {
   const rate = document.getElementById('samplingRate').value;
   const samplerURL = document.getElementById('samplerURL').value;
   const resultDiv = document.getElementById('result');
-
   fetch('/api/sampling/rate', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},

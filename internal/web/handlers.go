@@ -193,7 +193,13 @@ func (h *Handler) bansList(c *gin.Context) {
 
 func (h *Handler) banNew(c *gin.Context) {
 	u := h.currentUser(c)
-	c.HTML(http.StatusOK, "ban_new.html", gin.H{"u": u, "nav": policy.NavSections(u.Role)})
+	// 支持从采样页"封禁此源"跳转预填:/bans/new?target=1.2.3.4&reason=...
+	// 这样把"看见"和"封禁"接成一步,而不是让运维手抄 IP。
+	c.HTML(http.StatusOK, "ban_new.html", gin.H{
+		"u": u, "nav": policy.NavSections(u.Role),
+		"target": strings.TrimSpace(c.Query("target")),
+		"reason": strings.TrimSpace(c.Query("reason")),
+	})
 }
 
 func (h *Handler) banCreate(c *gin.Context) {
@@ -362,6 +368,7 @@ func (h *Handler) samplingConfig(c *gin.Context) {
 	c.HTML(http.StatusOK, "sampling.html", gin.H{
 		"u": u, "nav": policy.NavSections(u.Role),
 		"canConfigure": policy.Allow(u.Role, policy.SystemConfig),
+		"canBan":       policy.Allow(u.Role, policy.BanRequestCreate),
 		"samplerURL":   h.samplerURL,
 		"currentN":     SampleStore.SamplingN(),
 		"topFlows":     SampleStore.TopFlows(5*time.Minute, 20),
