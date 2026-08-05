@@ -54,7 +54,7 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 
 ```bash
 # x86_64
-curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-ban-linux-amd64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.25/xdp-ban-linux-amd64
 # arm64:把上面 URL 里的 amd64 换成 arm64
 
 chmod +x xdp-ban
@@ -66,8 +66,8 @@ chmod +x xdp-ban
 数据面(在实际干活的主机上,需 root)—— `xdp-sampler` 和 `xdp-agent` 同样方式下载:
 
 ```bash
-curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.23/xdp-agent-linux-amd64
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.25/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.25/xdp-agent-linux-amd64
 chmod +x xdp-sampler xdp-agent
 
 sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 100 -key <API_KEY>
