@@ -229,7 +229,55 @@ func (h *Handler) scopedBanApprove(c *gin.Context) {
 		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
 		return
 	}
+	sb.ApprovedByID = &u.ID
 	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID), "approved", sb.Label())
+
+	// 重新展开源前缀并生成下发指令。
+	//
+	// 为什么此时重新展开而不是用提交时的结果:前缀库可能已更新,
+	// 封禁应跟随 BGP 现实。代价是展开数量可能与提交时的配额记账有偏差,
+	// 所以这里比对并记录漂移 —— 有偏差时按实际数量修正配额。
+	pdb := prefixdb.Global()
+	if pdb == nil {
+		c.HTML(http.StatusServiceUnavailable, "error.html", gin.H{
+			"msg": "前缀库不可用,无法展开源范围。请先在「IP 库管理」导入。"})
+		return
+	}
+	cidrs, err := pdb.Resolve(prefixdb.Selector{Country: sb.Country, ASN: sb.ASN})
+	if err != nil {
+		c.HTML(http.StatusInternalServerError, "error.html", gin.H{"msg": err.Error()})
+		return
+	}
+
+	if len(cidrs) != sb.PrefixCount {
+		drift := fmt.Sprintf("提交时 %d 条,下发时 %d 条", sb.PrefixCount, len(cidrs))
+		_ = model.WriteAudit(h.db, &u.ID, u.Label(), "ScopedBan", itoa(sb.ID),
+			"prefix_drift", drift)
+		// 按实际数量修正配额占用,否则账面会与内核实际占用长期不符
+		h.quota.Release(sb.PrefixCount)
+		if err := h.quota.Reserve(len(cidrs)); err != nil {
+			h.quota.Reserve(sb.PrefixCount) // 恢复原占用,避免账面归零
+			c.HTML(http.StatusConflict, "error.html", gin.H{
+				"msg": "前缀库更新后该规则展开量超出配额:" + err.Error()})
+			return
+		}
+		h.db.Model(&sb).Updates(map[string]any{
+			"prefix_count": len(cidrs), "resolved_at": now,
+		})
+	}
+
+	prefixes := make([]string, 0, len(cidrs))
+	for _, p := range cidrs {
+		prefixes = append(prefixes, p.String())
+	}
+
+	if _, explain, err := h.dispatches().CreateScopedDispatch(&sb, prefixes); err != nil {
+		c.HTML(http.StatusForbidden, "error.html", gin.H{"msg": explain})
+		return
+	}
+
+	// 推进阶梯状态,使同一目标下次被攻击时封禁时长自然增长
+	h.recordLadder(sb.TargetIP)
 
 	c.Redirect(http.StatusFound, "/scoped")
 }

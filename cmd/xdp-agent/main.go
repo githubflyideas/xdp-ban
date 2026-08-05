@@ -1,26 +1,29 @@
-// Package main — xdp-agent: 纯 Go 单二进制
+// Package main — xdp-agent: 纯 Go 单二进制执行器。
 //
 // 职责:
-// 1. 轮询 xdp-ban 服务器 GET /api/v1/dispatch/pending
-// 2. 执行 dispatch 指令(直接操作嵌入的 eBPF map,NO nftables)
-// 3. 反馈执行状态 POST /api/v1/dispatch/:id/ack 或 /fail
+//  1. 加载嵌入的 eBPF bytecode,取得三张封禁 map
+//  2. 轮询 xdp-ban GET /api/v1/dispatch/pending
+//  3. 把指令翻译成 map 写入(编码逻辑在 internal/banmap,执行在 executor.go)
+//  4. 回执 POST /api/v1/dispatch/:id/ack 或 /fail
 //
 // 部署: 拷贝单个二进制即可运行(需 root)
 package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
+
+	"github.com/xdpban/xdp-ban/internal/banmap"
 )
 
 // Dispatch 下发指令
@@ -33,29 +36,23 @@ type Dispatch struct {
 	State        string `json:"state"`
 }
 
-// BanPayload 指令内容
+// BanPayload 指令内容。
+//
+// 两种形态由字段组合区分:
+//   - 单点封禁:Target 有值,ScopedTarget 为空 → 写全局表
+//   - 范围封禁:ScopedTarget + Prefixes 有值   → 写 target_hosts + src_ban
 type BanPayload struct {
-	Target   string `json:"target"`
-	TTLSecs  int64  `json:"ttl_secs"`
-	NodeID   string `json:"node_id"`
-	ReqID    uint   `json:"req_id"`
-	BanID    string `json:"ban_id"`
-	Backend  string `json:"backend"`
-	Reason   string `json:"reason"`
-}
+	Target  string `json:"target"`
+	TTLSecs int64  `json:"ttl_secs"`
+	NodeID  string `json:"node_id"`
+	ReqID   uint   `json:"req_id"`
+	BanID   string `json:"ban_id"`
+	Backend string `json:"backend"`
+	Reason  string `json:"reason"`
 
-// BanEntry 对应 bpf/xdp_filter.c 的 ban_entry(仅作文档参照,写 map 时手工编码)
-type BanEntry struct {
-	DstIP   uint32
-	DstPort uint16
-	Proto   uint8
-	_       uint8
-}
-
-// BanValue 对应 xdp_filter.c 的 ban_value
-type BanValue struct {
-	ExpiresAt uint64
-	Hits      uint32
+	// 范围封禁专用
+	ScopedTarget string   `json:"scoped_target,omitempty"`
+	Prefixes     []string `json:"prefixes,omitempty"`
 }
 
 type Config struct {
@@ -76,80 +73,141 @@ func main() {
 		Interval:  *interval,
 	}
 
-	log.Printf("XDP 执行器启动(纯 Go 单二进制): server=%s\n", cfg.ServerURL)
+	log.Printf("XDP 执行器启动: server=%s interval=%v", cfg.ServerURL, cfg.Interval)
 
 	// 1. 加载嵌入的 eBPF bytecode
 	if len(xdpFilterBytecode) == 0 {
 		log.Fatalf("嵌入的 eBPF bytecode 为空:请先运行 `make bpf` 编译 bpf/xdp_filter.c,再重新构建本程序")
 	}
-	reader := bytes.NewReader(xdpFilterBytecode)
-	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(xdpFilterBytecode))
 	if err != nil {
 		log.Fatalf("load ebpf spec: %v", err)
 	}
-
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
 		log.Fatalf("create ebpf collection: %v", err)
 	}
 	defer coll.Close()
 
-	banListMap := coll.Maps["ban_list"]
-	if banListMap == nil {
-		log.Fatalf("ban_list map not found")
+	// 2. 取出三张 map。缺任何一张都是致命的 —— bytecode 与本程序版本不匹配,
+	//    继续跑只会静默不生效。宁可启动失败。
+	maps, err := resolveMaps(coll)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
+	log.Printf("✓ eBPF map 就绪: %s / %s / %s",
+		banmap.MapGlobalBans, banmap.MapTargetHosts, banmap.MapSrcBans)
 
-	log.Printf("✓ eBPF 黑名单 map 已加载(纯 XDP 执行)\n")
+	boot, err := systemBootTime()
+	if err != nil {
+		log.Fatalf("读取系统启动时刻(TTL 换算依赖它): %v", err)
+	}
+	log.Printf("✓ 系统启动于 %s,TTL 将换算为 ktime 基准", boot.Format(time.RFC3339))
+
+	bm := newBanMaps(
+		maps[banmap.MapGlobalBans],
+		maps[banmap.MapTargetHosts],
+		maps[banmap.MapSrcBans],
+		boot,
+	)
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
-
 	for range ticker.C {
-		pollAndExecute(&cfg, banListMap)
+		pollAndExecute(&cfg, bm)
 	}
 }
 
-func pollAndExecute(cfg *Config, banListMap *ebpf.Map) {
-	// 1. 轮询待执行指令
+// resolveMaps 按名字取出所需的 map,任一缺失即报错。
+//
+// map 名是字符串查找,编译器抓不到不一致 —— 所以这里一次性全部校验,
+// 并把名字集中在 internal/banmap 的常量里。
+func resolveMaps(coll *ebpf.Collection) (map[string]*ebpf.Map, error) {
+	want := []string{banmap.MapGlobalBans, banmap.MapTargetHosts, banmap.MapSrcBans}
+	out := make(map[string]*ebpf.Map, len(want))
+	var missing []string
+	for _, name := range want {
+		m := coll.Maps[name]
+		if m == nil {
+			missing = append(missing, name)
+			continue
+		}
+		out[name] = m
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("eBPF bytecode 中缺少 map: %s —— "+
+			"bytecode 与本程序版本不匹配,请重新 `make bpf && make build`",
+			strings.Join(missing, ", "))
+	}
+	return out, nil
+}
+
+// systemBootTime 从 /proc/uptime 推算系统启动时刻。
+//
+// 为什么必须是**系统**启动时刻而非进程启动时刻:XDP 侧的
+// bpf_ktime_get_ns() 返回系统 uptime。用进程启动时刻算 deadline,
+// 在一台已运行数天的机器上会让所有封禁立刻被判成过期。
+func systemBootTime() (time.Time, error) {
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return time.Time{}, err
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return time.Time{}, fmt.Errorf("/proc/uptime 格式异常: %q", string(b))
+	}
+	secs, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("解析 uptime %q: %w", fields[0], err)
+	}
+	return time.Now().Add(-time.Duration(secs * float64(time.Second))), nil
+}
+
+func pollAndExecute(cfg *Config, bm *banMaps) {
 	dispatches, err := fetchPending(cfg)
 	if err != nil {
 		log.Printf("fetch pending: %v", err)
 		return
 	}
-
 	if len(dispatches) == 0 {
 		return
 	}
-
 	log.Printf("获取 %d 条待执行指令", len(dispatches))
 
-	// 2. 逐条执行
 	for _, d := range dispatches {
 		var payload BanPayload
 		if err := json.Unmarshal([]byte(d.Payload), &payload); err != nil {
-			log.Printf("parse payload: %v", err)
+			log.Printf("指令 #%d payload 解析失败: %v", d.ID, err)
 			markFailed(cfg, d.ID, fmt.Sprintf("parse error: %v", err))
 			continue
 		}
 
-		log.Printf("执行指令 #%d: %s (TTL=%ds)", d.ID, payload.Target, payload.TTLSecs)
+		log.Printf("执行指令 #%d: %s", d.ID, describePayload(&payload))
 
-		// 3. 直接写 eBPF map(XDP 执行)
-		if err := executeXDP(banListMap, &payload); err != nil {
-			log.Printf("execute XDP: %v", err)
-			markFailed(cfg, d.ID, fmt.Sprintf("exec error: %v", err))
+		if err := bm.Apply(&payload); err != nil {
+			log.Printf("指令 #%d 执行失败: %v", d.ID, err)
+			markFailed(cfg, d.ID, err.Error())
 			continue
 		}
 
-		// 4. 标记成功
 		markAck(cfg, d.ID)
 		log.Printf("指令 #%d 执行成功", d.ID)
 	}
 }
 
+func describePayload(p *BanPayload) string {
+	if p.ScopedTarget != "" {
+		return fmt.Sprintf("范围封禁 %d 条源前缀 → %s (TTL=%ds)",
+			len(p.Prefixes), p.ScopedTarget, p.TTLSecs)
+	}
+	return fmt.Sprintf("全局封禁 %s (TTL=%ds)", p.Target, p.TTLSecs)
+}
+
 func fetchPending(cfg *Config) ([]Dispatch, error) {
-	url := cfg.ServerURL + "/api/v1/dispatch/pending"
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, cfg.ServerURL+"/api/v1/dispatch/pending", nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("X-API-Key", cfg.APIKey)
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -159,10 +217,9 @@ func fetchPending(cfg *Config) ([]Dispatch, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-
 	var dispatches []Dispatch
 	if err := json.NewDecoder(resp.Body).Decode(&dispatches); err != nil {
 		return nil, err
@@ -170,84 +227,39 @@ func fetchPending(cfg *Config) ([]Dispatch, error) {
 	return dispatches, nil
 }
 
-// executeXDP 直接写 eBPF map。
-//
-// 键的内存布局必须与 bpf/xdp_filter.c 的 struct ban_entry 一致:
-//
-//	__u32 dst_ip    // 网络字节序,与 iphdr->daddr 原样一致
-//	__u16 dst_port  // 网络字节序,0 = 任意
-//	__u8  proto     // 0 = 任意
-//	__u8  _pad
-func executeXDP(banListMap *ebpf.Map, payload *BanPayload) error {
-	ip, err := parseTarget(payload.Target)
-	if err != nil {
-		return err
-	}
-
-	// dst_ip: 原样 4 字节(网络字节序),不做端序转换
-	key := make([]byte, 8)
-	copy(key[0:4], ip)
-	// key[4:6] dst_port = 0(任意), key[6] proto = 0(任意), key[7] 填充
-
-	expiresAt := uint64(0)
-	if payload.TTLSecs > 0 {
-		expiresAt = uint64(time.Now().UnixNano()) + uint64(payload.TTLSecs)*uint64(time.Second)
-	}
-
-	// 值布局: __u64 expires_at; __u32 hits; (+4 字节尾部对齐)
-	val := make([]byte, 16)
-	binary.LittleEndian.PutUint64(val[0:8], expiresAt)
-	binary.LittleEndian.PutUint32(val[8:12], 0)
-
-	if err := banListMap.Put(key, val); err != nil {
-		return fmt.Errorf("ban_list update: %w", err)
-	}
-
-	log.Printf("  ✓ 写入 eBPF map: %s (TTL=%ds)", payload.Target, payload.TTLSecs)
-	return nil
-}
-
-// parseTarget 解析目标为 4 字节 IPv4。当前只支持单个 IPv4 地址;
-// CIDR 需要 LPM_TRIE 类型的 map,属于后续工作,这里显式拒绝而不是静默按主机处理。
-func parseTarget(target string) ([]byte, error) {
-	if strings.Contains(target, "/") {
-		return nil, fmt.Errorf("暂不支持 CIDR 目标 %q:XDP 侧需要 LPM_TRIE map", target)
-	}
-	ip := net.ParseIP(target)
-	if ip == nil {
-		return nil, fmt.Errorf("非法目标地址: %q", target)
-	}
-	v4 := ip.To4()
-	if v4 == nil {
-		return nil, fmt.Errorf("暂不支持 IPv6 目标: %q", target)
-	}
-	return v4, nil
-}
-
 func markAck(cfg *Config, dispatchID uint) {
-	url := fmt.Sprintf("%s/api/v1/dispatch/%d/ack", cfg.ServerURL, dispatchID)
-	req, _ := http.NewRequest("POST", url, nil)
-	req.Header.Set("X-API-Key", cfg.APIKey)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, _ := client.Do(req)
-	if resp != nil {
-		resp.Body.Close()
-	}
+	postStatus(cfg, fmt.Sprintf("/api/v1/dispatch/%d/ack", dispatchID), nil)
 }
 
 func markFailed(cfg *Config, dispatchID uint, errMsg string) {
-	url := fmt.Sprintf("%s/api/v1/dispatch/%d/fail", cfg.ServerURL, dispatchID)
-	payload := map[string]string{"error": errMsg}
-	data, _ := json.Marshal(payload)
+	body, _ := json.Marshal(map[string]string{"error": errMsg})
+	postStatus(cfg, fmt.Sprintf("/api/v1/dispatch/%d/fail", dispatchID), body)
+}
 
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(data))
+// postStatus 回执。失败只记日志:控制面会因为指令长期 pending 而暴露问题,
+// 在这里重试反而可能把一次失败放大成风暴。
+func postStatus(cfg *Config, path string, body []byte) {
+	var r *bytes.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	} else {
+		r = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequest(http.MethodPost, cfg.ServerURL+path, r)
+	if err != nil {
+		log.Printf("构造回执请求 %s: %v", path, err)
+		return
+	}
 	req.Header.Set("X-API-Key", cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, _ := client.Do(req)
-	if resp != nil {
-		resp.Body.Close()
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("回执 %s 失败: %v", path, err)
+		return
 	}
+	resp.Body.Close()
 }

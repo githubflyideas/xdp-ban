@@ -170,24 +170,30 @@ level:      0        1       2      3       4
 
 ### 4.2 执行侧 (`bpf/xdp_filter.c`)
 
-两级匹配,支持"源地址范围 × 目标主机":
+两条查表路径,对应两类封禁:
 
 | Map | 类型 | 容量 | 用途 |
 |---|---|---|---|
+| `src_ban_global` | **LPM_TRIE** | 65,536 | 源前缀 → ban_value("封这个源,不限目标") |
 | `target_hosts` | HASH | 4,096 | 受保护目标主机 → target_id |
 | `src_ban` | **LPM_TRIE** | 262,144 | (target_id, src_prefix) → ban_value |
 | `counters` | PERCPU_ARRAY | 4 | dropped/passed/expired/not_target |
 
 查表路径:
 ```
-包进来 → 目标是否在 target_hosts?  否 → XDP_PASS (快路径,绝大多数包在此返回)
-                                   是 ↓
-         源是否落在该目标的封禁前缀内(LPM 最长匹配)?  否 → XDP_PASS
-                                   是 ↓
-                        TTL 是否过期?  是 → XDP_PASS + 计数
-                                   否 ↓
-                                XDP_DROP
+包进来 → 源是否在全局封禁表内(LPM)?  是 → TTL 未过期 → XDP_DROP
+                                     否 ↓
+       目标是否在 target_hosts?        否 → XDP_PASS(快路径,绝大多数包在此返回)
+                                     是 ↓
+       源是否落在该目标的封禁前缀内?    否 → XDP_PASS
+                                     是 ↓
+                          TTL 是否过期?  是 → XDP_PASS + 计数
+                                     否 ↓
+                                  XDP_DROP
 ```
+
+全局表放在最前面是刻意的 —— 单点封禁最常用,让它走最短路径。
+正常流量的成本是 1 次 LPM miss + 1 次 HASH miss。
 
 **LPM_TRIE 是范围封禁能成立的前提**:一条 `/8` 在 LPM_TRIE 里占 **1** 个表项,
 在 HASH 里要 1600 万个。
@@ -202,15 +208,29 @@ level:      0        1       2      3       4
 
 放用户态的:审批、权限、阶梯 TTL、SafetyGuard、裁决、map 增删、ringbuf 消费。
 
-**两个必须守死的契约:**
+编码逻辑单独拆到 `internal/banmap`,理由是**能在没有内核、没有 root 的
+环境里单测这层契约**。agent 的 `main.go` 只负责轮询与调度,
+`executor.go` 负责翻译成 map 写入(依赖抽象的 `mapWriter` 接口而非 `*ebpf.Map`)。
 
-1. **字节序**。`ban_entry.dst_ip` 直接取自 `iphdr->daddr`,是网络字节序。
-   用户态若按主机序拼 key,写进去的 key 与 XDP 侧算出的永不相等 ——
-   黑名单静默失效,界面显示"已封禁"而流量照进。
-   由 `TestBuildKey_UsesNetworkByteOrder` 锁死。
+**四条必须守死的契约,全部有测试锁定:**
 
-2. **结构体布局**。`SampleEvent`(Go)与 `struct sample_event`(C)必须同尺寸(28 字节),
-   否则 `binary.Read` 错位,所有字段都错。由 `TestSampleEventSize` 守护。
+| 契约 | 违反后果 | 测试 |
+|---|---|---|
+| map 名一致 | agent 启动即 Fatalf,或规则静默不生效 | `TestMapNamesMatchBPFSource`(解析 C 源码比对) |
+| 结构体尺寸 | key 编码错位,写进去的 key 与内核算出的不等 | `TestKeyValueSizesMatchBPFSource` |
+| 容量上限一致 | 配额算错余量,下发时收 E2BIG | `TestMaxSrcBansMatchesQuotaCapacity` |
+| JSON payload 形状 | 定向封禁被当成单点封禁写进全局表 | `TestPayloadContract_SingleAndScoped` |
+
+另外两条:
+
+- **字节序**。IP 字段是网络字节序,与 `iphdr->saddr/daddr` 原样一致,不做转换。
+  prefixlen / target_id 等数值字段是主机字节序。
+- **LPM key 必须归一化**。`netip.Prefix.Masked()` —— 超出 prefixlen 的位
+  必须为 0,否则内核插入位置与查询时的最长匹配不一致,规则永远匹配不上。
+- **TTL 用 ktime 而非 Unix 时间**。XDP 只能拿到 `bpf_ktime_get_ns()`
+  (系统 uptime)。用 Unix 纳秒会让所有封禁被判成"未过期"而永久生效。
+  agent 从 `/proc/uptime` 读**系统**启动时刻做换算 —— 用进程启动时刻的话,
+  在已运行数天的机器上所有封禁会立刻失效。
 
 ---
 
@@ -277,24 +297,34 @@ pragma 名写错时驱动静默忽略,不验证会以为开了其实没开。
 
 诚实清单。按严重程度排序。
 
-### P0 — agent 与当前 eBPF 程序不匹配(阻塞)
+### 已修复 — agent 与 eBPF 程序不匹配(曾为 P0)
 
-**做范围封禁时重构了 `xdp_filter.c`(单级 `ban_list` → 两级 `target_hosts` + `src_ban`),
-但没同步更新 `xdp-agent` 的写入逻辑。**
+做范围封禁时重构了 `xdp_filter.c`(单级 `ban_list` → 两级 `target_hosts` + `src_ban`),
+但没同步更新 agent 的写入逻辑:agent 找已不存在的 `ban_list`,启动即 Fatalf;
+key 编码也还是旧的 8 字节格式。**控制面完整可用,执行面实际跑不起来。**
 
-- agent 找 `coll.Maps["ban_list"]` —— 该 map 已不存在,启动即 `log.Fatalf`
-- agent 的 key 编码仍是旧的 8 字节 `(dst_ip, dst_port, proto)`,
-  而 `src_ban` 需要 12 字节 LPM key `(prefixlen, target_id, src_ip)`
-- agent 也没有写 `target_hosts` 的逻辑
+单测没抓到,是因为它们只覆盖纯函数(parseTarget、字节序、结构体布局),
+**没有任何测试触及 map 加载与写入**。
 
-现状:控制面完整可用,**执行面实际跑不起来**。单测没抓到是因为它们只测了
-纯函数(parseTarget、字节序、结构体布局),没有覆盖 map 加载与写入。
+修复内容:
+
+- eBPF 侧补上 `src_ban_global`(LPM_TRIE),让单点封禁走全局表 ——
+  此前重构只考虑了定向封禁,把最常用的"封这个源不限目标"场景丢了
+- 编码逻辑抽到 `internal/banmap`,能在无内核环境单测
+- agent 拆出 `executor.go`,依赖抽象 `mapWriter` 接口,用内存 fake 完整测试
+  两条执行路径(单点 → 全局表;范围 → target_hosts + src_ban)
+- 补上 §4.3 那四条契约测试,其中 map 名与结构体尺寸的测试**直接解析 C 源码比对**
+  —— 已验证:把 C 侧 map 改名后测试立即失败
+- TTL 换算修正为 ktime 基准并从 `/proc/uptime` 读系统启动时刻
+- 控制面补 `CreateScopedDispatch`,范围封禁审批时重新展开前缀并检测漂移
 
 ### P1 — 过期表项没有内核侧清理
 
 XDP 只判 TTL 并放行,不删表项(内核删除需额外写权限与复杂度)。
 缺少用户态 reaper 定期扫 map 删过期项并释放配额 ——
 长期运行后表项会被过期规则占满,最终触发 §5 的静默失效。
+
+**这是当前唯一会随时间累积成事故的缺口。**
 
 ### P1 — obj/*.o 是占位空文件
 
@@ -323,7 +353,9 @@ dispatch 里。加一个状态要改七八处,漏一处就是"某状态下能做
 ### P2 — BanRequest 与 ScopedBan 重复
 
 两套几乎相同的字段和审批逻辑,只因为一个有源范围一个没有。
-应该是同一实体,源范围为可选字段。现状意味着**每个治理特性都要写两遍**。
+应该是同一实体,源范围为可选字段。现状意味着**每个治理特性都要写两遍**
+—— 这次修 P0 就付了这个代价:`CreateDispatch` 和 `CreateScopedDispatch`
+是两份高度相似的代码。
 
 ### P3 — 其他
 
@@ -367,12 +399,11 @@ TopFlows 满载 ~1.4 ms、Gin 端到端 9–13 ms(含 curl 开销)。
 
 按"能否直接支撑收费"排序:
 
-1. **修 P0**(agent/eBPF 对齐)—— 不修的话执行面是死的
-2. **过期表项 reaper** —— 唯一会随时间累积成事故的缺口
-3. **LDAP / SSO** —— 企业采购硬门槛
-4. **多节点集中管控** —— 单机免费引流、多节点收费,最自然的开源/商业分界
-5. **告警集成**(邮件/Webhook/钉钉)—— 运维日常黏性
-6. **威胁情报源接入** —— 从人工封禁变成自动响应
+1. **过期表项 reaper** —— 唯一会随时间累积成事故的缺口
+2. **LDAP / SSO** —— 企业采购硬门槛
+3. **多节点集中管控** —— 单机免费引流、多节点收费,最自然的开源/商业分界
+4. **告警集成**(邮件/Webhook/钉钉)—— 运维日常黏性
+5. **威胁情报源接入** —— 从人工封禁变成自动响应
 
 **不该优先做**:更快的 XDP、更多协议。性能不是购买决策点 ——
 客户不会因为你从 10 Mpps 到 20 Mpps 付钱,但会因为测评过不了而付钱。

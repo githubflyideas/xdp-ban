@@ -20,12 +20,14 @@ func newTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.BanRequest{}, &model.Dispatch{}, &model.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&model.BanRequest{}, &model.Dispatch{},
+		&model.AuditLog{}, &model.ScopedBan{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	// 每个用例开始时清表,避免 shared cache 下的相互污染
 	db.Exec("DELETE FROM dispatches")
 	db.Exec("DELETE FROM ban_requests")
+	db.Exec("DELETE FROM scoped_bans")
 	db.Exec("DELETE FROM audit_logs")
 	return db
 }
