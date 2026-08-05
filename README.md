@@ -54,7 +54,7 @@ Download the binary and run it. No dependencies, no build step — the eBPF obje
 
 ```bash
 # x86_64
-curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-ban-linux-amd64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-ban-linux-amd64
 # arm64: replace amd64 with arm64 in the URL above
 
 chmod +x xdp-ban
@@ -66,8 +66,8 @@ Data lives in a single `xdpban.db` file. Back up = copy the file.
 Data plane (root, on the hosts doing the work) — same download pattern for `xdp-sampler` and `xdp-agent`:
 
 ```bash
-curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-agent-linux-amd64
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-agent-linux-amd64
 chmod +x xdp-sampler xdp-agent
 
 sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples -n 100 -key <API_KEY>
@@ -118,12 +118,17 @@ Without it, everything else works and the UI tells you the feature is unavailabl
 ## Build from source
 
 Only needed if you're hacking on it — released binaries already bundle the eBPF objects.
+Requires `clang` and `libbpf-dev`.
 
 ```bash
-make bpf      # compile eBPF (needs clang)
-make build    # build the three binaries
+make bpf      # clang → cmd/*/obj/*.o (embedded via go:embed)
+make build    # three binaries; refuses to run if the .o files are missing
 make check    # go vet + go test -race
+make release  # bpf + check + cross-compile linux/{amd64,arm64}
 ```
+
+The `.o` files are build artifacts, not tracked in git. `make build` asserts they
+are non-empty, so a binary with empty bytecode can't be shipped by accident.
 
 Engineering notes — concurrency model, error-handling conventions, Go/eBPF boundary, and measured profiling results — are in [ENGINEERING.md](ENGINEERING.md).
 

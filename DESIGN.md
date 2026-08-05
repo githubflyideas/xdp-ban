@@ -326,12 +326,32 @@ XDP 只判 TTL 并放行,不删表项(内核删除需额外写权限与复杂度
 
 **这是当前唯一会随时间累积成事故的缺口。**
 
-### P1 — obj/*.o 是占位空文件
+### 已修复 — 发布二进制内嵌空 bytecode(曾为 P1)
 
-仓库里的 `.o` 是 0 字节占位,使无 clang 的机器也能编译 Go 部分。
-运行时会 `log.Fatalf("bytecode 为空")` 明确报错。
-发布的二进制需在有 clang 的环境 `make bpf` 后重新构建 —— **当前 release
-的 agent/sampler 二进制内嵌的是空 bytecode**。
+此前仓库跟踪 `obj/*.o` 的 0 字节占位文件(为了让无 clang 的机器也能编译
+Go 部分),但发布流程没有强制先 `make bpf` —— 结果 v0.26 及之前的
+agent/sampler 二进制内嵌的是空 bytecode,运行时报
+`bytecode 为空`。**错误发生在客户机器上,而不是构建时。**
+
+修复内容:
+
+- `.o` 从版本库移除(它是构建产物,不该有第二份事实源)
+- 新增 `make bpf-check` 断言 `.o` 非空,`build`/`dist` 都依赖它 ——
+  忘了跑 `make bpf` 时构建直接失败,而不是产出坏二进制
+- `make bpf` 补上 `-I/usr/include/$(ARCH_TRIPLET)`:Debian/Ubuntu 把
+  `asm/` 放在架构子目录,不加会 `asm/types.h not found`
+- 新增 `make release` 串起完整流程:`bpf → check → dist`
+- 补 `TestEmbeddedBytecodeHasRequiredMaps`:真正解析内嵌 bytecode,
+  断言所需 map 都在且容量正确。这条测试在 `.o` 为空时会 skip 并说明原因
+
+同时修掉编译 sampler 时暴露的两个 eBPF 侧真实缺陷:
+
+- **包长算错**:用了 `ctx->data_meta - data`。`data_meta` 指向元数据区
+  (XDP 程序间传递自定义数据用),与包长无关 —— 上报的字节数全是垃圾。
+  改为 `data_end - data`。这个错误此前编译不过所以一直没暴露。
+- **采样退化成"全采或全不采"**:随机种子只用 `ctx->rx_queue_index`,
+  同一队列上每个包算出的随机数完全相同,采样率形同虚设。
+  改为混入五元组与 ktime。顺带给 `rate == 0` 加兜底(除零会被 verifier 拒绝)。
 
 ### P2 — 会话存内存
 

@@ -93,6 +93,12 @@ int xdp_sample(struct xdp_md *ctx)
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
+    /* 包长 = data_end - data。
+     * 注意不是 ctx->data_meta —— data_meta 指向元数据区(XDP 程序间传递
+     * 自定义数据用的),与包长无关。用它算长度会得到负数或垃圾值,
+     * 上报的字节数全错。 */
+    __u32 pkt_len = (__u32)(data_end - data);
+
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
@@ -134,16 +140,21 @@ int xdp_sample(struct xdp_md *ctx)
     struct stats *gs = bpf_map_lookup_elem(&global_stats, &idx);
     if (gs) {
         __sync_fetch_and_add(&gs->total_packets, 1);
-        __sync_fetch_and_add(&gs->total_bytes, ctx->data_meta - data);
+        __sync_fetch_and_add(&gs->total_bytes, (__u64)pkt_len);
     }
 
-    /* 采样判定 (1/N) */
+    /* 采样判定 (1/N)。
+     * rate 为 0 会导致除零,verifier 直接拒绝加载 —— 必须兜底。 */
     __u32 *rate_ptr = bpf_map_lookup_elem(&sampling_rate, &idx);
-    __u32 rate = rate_ptr ? *rate_ptr : 100;  /* 默认 1/100 */
+    __u32 rate = (rate_ptr && *rate_ptr > 0) ? *rate_ptr : 100;
 
-    __u32 seed = ctx->rx_queue_index;
-    __u32 rand = prng(seed);
-    __u8 sampled = (rand % rate) == 0;
+    /* 用包内容参与散列,而不是只用队列号。
+     * 只用 rx_queue_index 的话同一队列上每个包算出的随机数完全相同,
+     * 结果是"整队列全采或全不采",采样率形同虚设。 */
+    __u32 seed = ctx->rx_queue_index ^ flow.src_ip ^ flow.dst_ip
+                 ^ ((__u32)flow.src_port << 16 | flow.dst_port)
+                 ^ (__u32)bpf_ktime_get_ns();
+    __u8 sampled = (prng(seed) % rate) == 0;
 
     if (sampled && gs) {
         __sync_fetch_and_add(&gs->sampled_packets, 1);
@@ -154,13 +165,13 @@ int xdp_sample(struct xdp_md *ctx)
     if (!fstats) {
         struct flow_stats new_stats = {
             .packets = 1,
-            .bytes = ctx->data_meta - data,
+            .bytes = pkt_len,
             .last_seen = bpf_ktime_get_ns(),
         };
         bpf_map_update_elem(&flow_table, &flow, &new_stats, 0);
     } else {
         __sync_fetch_and_add(&fstats->packets, 1);
-        __sync_fetch_and_add(&fstats->bytes, ctx->data_meta - data);
+        __sync_fetch_and_add(&fstats->bytes, (__u64)pkt_len);
         fstats->last_seen = bpf_ktime_get_ns();
     }
 
@@ -170,7 +181,7 @@ int xdp_sample(struct xdp_md *ctx)
         if (evt) {
             evt->ts = bpf_ktime_get_ns();
             evt->flow = flow;
-            evt->pkt_len = ctx->data_meta - data;
+            evt->pkt_len = (__u16)pkt_len;
             evt->sampled = 1;
             bpf_ringbuf_submit(evt, 0);
         }

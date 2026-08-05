@@ -54,7 +54,7 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 
 ```bash
 # x86_64
-curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-ban-linux-amd64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-ban-linux-amd64
 # arm64:把上面 URL 里的 amd64 换成 arm64
 
 chmod +x xdp-ban
@@ -66,8 +66,8 @@ chmod +x xdp-ban
 数据面(在实际干活的主机上,需 root)—— `xdp-sampler` 和 `xdp-agent` 同样方式下载:
 
 ```bash
-curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.26/xdp-agent-linux-amd64
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-agent-linux-amd64
 chmod +x xdp-sampler xdp-agent
 
 sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 100 -key <API_KEY>
@@ -116,12 +116,17 @@ XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 ## 从源码构建
 
 仅在你要改代码时需要 —— 发布的二进制已内嵌 eBPF 目标文件。
+需要 `clang` 与 `libbpf-dev`。
 
 ```bash
-make bpf      # 编译 eBPF(需 clang)
-make build    # 编译三个二进制
+make bpf      # clang → cmd/*/obj/*.o(由 go:embed 嵌入)
+make build    # 编译三个二进制;.o 缺失时直接失败
 make check    # go vet + go test -race
+make release  # bpf + check + 交叉编译 linux/{amd64,arm64}
 ```
+
+`.o` 是构建产物,不进版本库。`make build` 会断言它们非空,
+避免误发出内嵌空 bytecode 的二进制。
 
 工程说明 —— 并发模型、错误处理规范、Go/eBPF 边界、实测的 profiling 结果 —— 见 [ENGINEERING.md](ENGINEERING.md)。
 
