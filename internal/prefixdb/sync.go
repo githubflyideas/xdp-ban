@@ -43,32 +43,27 @@ type Source struct {
 // Sources 内置的上游列表。
 //
 // 只收录:许可清晰、无需注册、单文件可直接解析的源。
-// MaxMind GeoLite2 需要账号与许可协议点击同意,不适合内置自动拉取,
-// 但用户可下载后走"上传文件"路径。
+// iptoasn 已从列表移除:其下载端点间歇不可用,同步失败率高。
+// 推荐通过"上传文件"路径使用:在能出网的机器上手动下载后上传。
+// MaxMind GeoLite2 需要账号与许可协议点击同意,不适合内置自动拉取。
 var Sources = []Source{
 	{
-		ID: "iptoasn", Name: "IPtoASN (推荐)",
-		URL:    "https://iptoasn.com/data/ip2asn-v4.tsv.gz",
-		Format: "ip2asn_tsv", License: "PDDL 1.0 (公共领域)",
-		Note:   "每小时更新,同时提供国家与 AS 归属,基于 BGP 实际公告",
-	},
-	{
-		ID: "iptoasn_combined", Name: "IPtoASN (含 IPv6)",
-		URL:    "https://iptoasn.com/data/ip2asn-combined.tsv.gz",
-		Format: "ip2asn_tsv", License: "PDDL 1.0 (公共领域)",
-		Note:   "同上但含 IPv6 记录;当前仅解析 IPv4 部分",
-	},
-	{
-		ID: "apnic", Name: "APNIC 分配记录",
+		ID: "apnic", Name: "APNIC 分配记录(亚太)",
 		URL:    "https://ftp.apnic.net/stats/apnic/delegated-apnic-extended-latest",
 		Format: "rir_delegated", License: "APNIC 开放数据",
 		Note:   "亚太地区权威注册数据,含国家但不含 AS;归属口径为注册而非路由",
 	},
 	{
-		ID: "ripe", Name: "RIPE NCC 分配记录",
+		ID: "ripe", Name: "RIPE NCC 分配记录(欧洲/中东)",
 		URL:    "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
 		Format: "rir_delegated", License: "RIPE 开放数据",
 		Note:   "欧洲与中东地区权威注册数据",
+	},
+	{
+		ID: "arin", Name: "ARIN 分配记录(北美)",
+		URL:    "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
+		Format: "rir_delegated", License: "ARIN 开放数据",
+		Note:   "北美地区权威注册数据",
 	},
 }
 

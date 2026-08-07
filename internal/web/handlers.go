@@ -371,7 +371,7 @@ func (h *Handler) samplingConfig(c *gin.Context) {
 		"canBan":       policy.Allow(u.Role, policy.BanRequestCreate),
 		"samplerURL":   h.samplerURL,
 		"currentN":     SampleStore.SamplingN(),
-		"topFlows":     SampleStore.TopFlows(5*time.Minute, 20),
+		"topFlows":     SampleStore.TopFlows(5*time.Minute, 200),
 	})
 }
 

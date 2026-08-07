@@ -22,7 +22,7 @@ v5 的限制(32 位计数器、仅 IPv4)对抽样统计无影响——采样本�
 sudo ./xdp-sampler \
   -d eth1 \
   -url http://<control>:8080/api/v1/samples \
-  -n 100 \
+  -n 4096 \
   -key <API_KEY> \
   -netflow 127.0.0.1:2055
 ```
@@ -30,14 +30,18 @@ sudo ./xdp-sampler \
 采样率(`-n`)会写入 NetFlow 报文的 sampling_interval 字段,ElastiFlow
 据此把采样计数乘以 N 还原真实流量,不需要在 ElastiFlow 侧再配一遍。
 
-## 一键起 ElastiFlow
+## 一键起 ElastiFlow(Docker 或 Podman)
 
-`deploy/elastiflow/` 下的 compose 拉起 Elasticsearch + Kibana + ElastiFlow
-flow collector,监听 `2055/udp`:
+`deploy/elastiflow/` 下的 compose 文件兼容 Docker Compose v2 与 Podman Compose:
 
 ```bash
 cd deploy/elastiflow
+
+# Docker
 docker compose up -d
+
+# Podman(需安装 podman-compose)
+podman-compose up -d
 
 # 首次启动 Elasticsearch 需要一两分钟,就绪后:
 #   Kibana:      http://localhost:5601

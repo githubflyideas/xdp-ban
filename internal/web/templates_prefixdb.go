@@ -41,17 +41,24 @@ textarea{width:100%;min-height:190px;font-family:"SF Mono",Menlo,Consolas,monosp
 <div><div class="n">{{.stats.ASNs}}</div><div class="l">自治系统</div></div>
 <div><div class="n">{{.stats.OverrideCount}}</div><div class="l">本地覆盖规则</div></div>
 </div>
-<div style="color:#67748a;font-size:11.5px;margin-top:8px">
+<div style="color:#67748a;font-size:13px;margin-top:8px">
 加载时间 {{.stats.LoadedAt.Format "2006-01-02 15:04:05"}} ·
 <span class="mono">{{.stats.SourcePath}}</span></div>
 </div></div>
 {{else}}
-<div class="flash err">尚未导入 IP 前缀库,按国家 / AS 封禁功能不可用。请用下方任一方式导入。</div>
+<div class="flash err">尚未导入 IP 前缀库,按国家 / AS 封禁功能不可用。
+请用下方任一方式导入，推荐在能出网的机器上手动下载后通过"上传文件"导入。</div>
 {{end}}
 
 <div id="syncBox"></div>
 
 <div class="card"><div class="hd">方式一:在线同步(需出网)</div><div class="bd">
+<p style="color:#67748a;font-size:14px;margin-top:0">
+从 RIR 官方 FTP 直接拉取 IP 分配记录。含国家归属,不含 AS 号。
+如需含 AS 号的数据,请在能出网的机器上下载
+<a href="https://iptoasn.com/data/ip2asn-v4.tsv.gz" target="_blank" style="color:#1e3050">iptoasn.com/data/ip2asn-v4.tsv.gz</a>
+后通过下方"方式二"上传。
+</p>
 <form method="post" action="/prefixdb/sync">
 {{range $i, $s := .sources}}
 <label class="src">
@@ -66,7 +73,7 @@ textarea{width:100%;min-height:190px;font-family:"SF Mono",Menlo,Consolas,monosp
 {{end}}
 <div style="margin-top:14px">
 <button class="btn primary">开始同步</button>
-<span style="color:#98a2b3;font-size:11.5px;margin-left:10px">
+<span style="color:#98a2b3;font-size:13px;margin-left:10px">
 下载与解析在后台进行,可能需要数分钟;期间旧库继续服务。</span>
 </div>
 </form>
