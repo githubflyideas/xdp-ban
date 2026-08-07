@@ -48,7 +48,7 @@ CIDR / IPv6 显式拒绝(当前 HASH map 无法表达 LPM),而不是被静默当
 
 **a. 包装后上抛(`fmt.Errorf(... %w ...)`)** —— 库/服务层。
 调用方需要判别或链式定位时用 `%w` 保留链。例:`dispatch.CreateDispatch` 的
-`marshal payload: %w`、`create dispatch: %w`;`xdp-agent` 的 `ban_list update: %w`。
+`marshal payload: %w`、`create dispatch: %w`;`xdp-ban` 执行器(原 `xdp-agent`,已合并)的 `ban_list update: %w`。
 
 **b. 哨兵错误 + `errors.Is`** —— 需要分支处理的预期失败。
 `internal/web` 定义 `errSelfApproval` / `errStateConflict`,审批事务内返回,

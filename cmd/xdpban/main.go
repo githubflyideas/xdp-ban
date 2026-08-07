@@ -1,16 +1,31 @@
-// Command xdp-ban —— 单二进制封禁治理平台。
-// 看见即封禁:eBPF 流量采样 + 治理式封禁。
+// Command xdp-ban —— 单二进制封禁治理平台 + 执行器。
+// 看见即封禁:eBPF 流量采样(独立的 xdp-sampler 进程)+ 治理式封禁执行(本进程)。
+//
+// 本进程原本拆成两个二进制:xdp-ban(Gin/GORM 控制面,只管审批与下发排队)
+// 和 xdp-agent(纯执行器,轮询 xdp-ban 的 HTTP API 拉取指令、写 eBPF map)。
+// 合并的理由:两者本就部署在同一台主机、同一次生命周期里,拆开只多了一趟
+// 本地 HTTP 回环(下发指令要先落库,再靠 agent 用 HTTP 轮询自己的服务器
+// 才能读出来),外加一套重复的 API Key 鉴权。合并后 executor 直接查 DB、
+// 直接调用同一个 Apply,指令生效延迟从"一个轮询周期"降到"审批提交那一刻"。
+//
+// xdp-sampler 仍是独立二进制:它跑在镜像口上做纯采样,只读不拦截,
+// 与本进程的执行逻辑没有共享状态,没有合并的理由。
 //
 // 构建单静态二进制:
-//   CGO_ENABLED=0 go build -ldflags "-s -w" -o xdp-ban ./cmd/xdpban
-// 运行:
-//   ./xdp-ban            # 默认 :8080,数据落 ./xdpban.db
+//
+//	CGO_ENABLED=0 go build -ldflags "-s -w" -o xdp-ban ./cmd/xdpban
+//
+// 运行(需 root,因为要 attach XDP 程序到网卡):
+//
+//	sudo ./xdp-ban -iface eth0     # 默认 :8080,数据落 ./xdpban.db
 package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -28,6 +43,22 @@ func main() {
 	dbPath := env("XDPBAN_DB", "xdpban.db")
 	addr := env("XDPBAN_ADDR", ":8080")
 
+	// XDP 封禁执行的挂载网卡。-iface 优先于环境变量,两者都没给则拒绝启动 ——
+	// 静默不挂 XDP 程序等于"界面显示已封禁,流量照样进来",这是最危险的
+	// 失败模式,宁可启动失败也不要默默跳过执行层。
+	ifaceFlag := flag.String("iface", "", "XDP 封禁程序挂载的网卡(业务口,不是采样镜像口)")
+	pollInterval := flag.Duration("poll-interval", 5*time.Second, "扫描待执行 dispatch 的间隔")
+	flag.Parse()
+
+	iface := *ifaceFlag
+	if iface == "" {
+		iface = os.Getenv("XDPBAN_IFACE")
+	}
+	if iface == "" {
+		log.Fatalf("必须指定 XDP 封禁网卡:-iface <ifname> 或环境变量 XDPBAN_IFACE。" +
+			"这是执行层生效的前提,没有它封禁只会停留在审批记录里,不会真正拦截流量。")
+	}
+
 	log.Printf("xdp-ban %s starting", Version)
 
 	db, err := model.Open(dbPath)
@@ -43,6 +74,13 @@ func main() {
 	// 由界面同步/上传产生的文件。这样一次配置之后,后续都从界面维护。
 	loadPrefixDB()
 
+	// 执行层:加载 eBPF、attach 到网卡、启动轮询循环。
+	// 失败即 Fatalf——启动期不可恢复的错误必须快速失败,不能让一个
+	// "看起来在跑但从不生效"的进程留在生产上。
+	bm, closeXDP := startExecutor(db, iface)
+	defer closeXDP()
+	go runExecutorLoop(db, bm, *pollInterval)
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
@@ -55,7 +93,7 @@ func main() {
 		log.Printf("pprof 已启用: %s/debug/pprof/ (务必仅绑定内网)", addr)
 	}
 
-	log.Printf("xdp-ban listening on %s (db=%s)", addr, dbPath)
+	log.Printf("xdp-ban listening on %s (db=%s, xdp iface=%s)", addr, dbPath, iface)
 	if err := r.Run(addr); err != nil {
 		log.Fatal(err)
 	}

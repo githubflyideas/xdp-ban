@@ -15,6 +15,8 @@ import (
 // 只解析 spec 不创建 collection —— 创建需要 root 与内核支持,
 // 但 spec 解析已经能抓住"map 名不匹配""bytecode 是空文件"这两类问题,
 // 而这正是此前漏掉的。
+//
+// 原属 cmd/xdp-agent,随执行器合并进 xdp-ban。
 func TestEmbeddedBytecodeHasRequiredMaps(t *testing.T) {
 	if len(xdpFilterBytecode) == 0 {
 		t.Skip("obj/xdp_filter.o 为占位空文件;在有 clang 的环境执行 `make bpf` 后此测试才有意义")
@@ -31,7 +33,7 @@ func TestEmbeddedBytecodeHasRequiredMaps(t *testing.T) {
 	} {
 		m, ok := spec.Maps[name]
 		if !ok {
-			t.Errorf("内嵌 bytecode 缺少 map %q —— agent 启动会 Fatalf", name)
+			t.Errorf("内嵌 bytecode 缺少 map %q —— xdp-ban 启动会 Fatalf", name)
 			continue
 		}
 		t.Logf("✓ %s: %s, max_entries=%d", name, m.Type, m.MaxEntries)

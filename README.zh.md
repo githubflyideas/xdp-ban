@@ -32,21 +32,26 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 
 ## 架构
 
-三个二进制,可独立部署:
+两个二进制,可独立部署:
 
 | 二进制 | 职责 | 需要 root |
 |---|---|---|
-| `xdp-ban` | 控制面:Web 界面、审批治理、SQLite | 否 |
-| `xdp-agent` | 执行面:轮询指令,写 XDP 黑名单 map | 是 |
+| `xdp-ban` | 控制面 + 执行面:Web 界面、审批治理、SQLite、写 XDP 封禁 map | 是 |
 | `xdp-sampler` | 观测面:在镜像口做 1/N 采样并上报流量 | 是 |
 
 ```
 交换机镜像 ──▶ [eth1] xdp_sampler.o ──ringbuf──▶ xdp-sampler ──HTTP──▶ xdp-ban
                                                                          │
-业务流量 ─────▶ [eth0] xdp_filter.o ◀──eBPF map── xdp-agent ◀──HTTP──────┘
+业务流量 ─────▶ [eth0] xdp_filter.o ◀──eBPF map──────────────────── (进程内直接调用)
 ```
 
-采样是**旁路**的:它观测的是流量副本,恒返回 `XDP_PASS`,只看不丢。执行是业务网卡上另一个独立程序。
+`xdp-ban` 原本拆成控制面和一个独立的 `xdp-agent` 执行器 —— 后者通过 HTTP
+轮询控制面自己的 API 拉取待执行指令。两者已合并:`xdp-ban` 现在自己加载并
+挂载 XDP 封禁程序,审批通过后直接对数据库执行,不再有本地 HTTP 回环。
+启动时需要 `-iface <网卡名>`(业务口,不是镜像口)告诉它挂在哪张卡上。
+
+采样仍是独立二进制 —— 它跑在镜像口上,只观测不拦截(恒 `XDP_PASS`),
+与执行逻辑没有共享状态,没有合并的理由。
 
 ## 快速开始
 
@@ -58,7 +63,7 @@ curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v
 # arm64:把上面 URL 里的 amd64 换成 arm64
 
 chmod +x xdp-ban
-./xdp-ban    # http://localhost:8080
+sudo ./xdp-ban -iface eth0    # http://localhost:8080 —— 需要 root 来挂载 XDP
 ```
 
 ### 默认账号
@@ -80,15 +85,13 @@ chmod +x xdp-ban
 
 数据存于单个 `xdpban.db` 文件,备份就是拷贝这个文件。
 
-数据面(在实际干活的主机上,需 root)—— `xdp-sampler` 和 `xdp-agent` 同样方式下载:
+数据面(在实际干活的主机上,需 root):
 
 ```bash
 curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-agent-linux-amd64
-chmod +x xdp-sampler xdp-agent
+chmod +x xdp-sampler
 
 sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 4096 -key <API_KEY>
-sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 ```
 
 全部版本:https://github.com/githubflyideas/xdp-ban/releases
@@ -119,16 +122,36 @@ XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 
 ## 配置
 
+`xdp-ban` 启动参数:
+
+| 参数 | 默认值 | 用途 |
+|---|---|---|
+| `-iface` | —(必填) | XDP 封禁程序挂载的业务网卡。没有默认值 —— 静默跳过这一步等于封禁永远停留在审批记录里,从不真正生效。 |
+| `-poll-interval` | `5s` | 扫描待执行 dispatch 的间隔 |
+
+`xdp-ban` 环境变量:
+
 | 环境变量 | 默认值 | 用途 |
 |---|---|---|
 | `XDPBAN_DB` | `xdpban.db` | SQLite 文件路径 |
 | `XDPBAN_ADDR` | `:8080` | 监听地址 |
-| `XDPBAN_API_KEY` | `changeme` | agent / sampler 访问 API 的共享密钥 |
+| `XDPBAN_API_KEY` | `changeme` | 采样器上报接口的共享密钥 |
 | `XDPBAN_BASE_URL` | `http://localhost:8080` | 邮件审批链接前缀 |
-| `XDPBAN_SAMPLER_URL` | `http://localhost:9090` | 采样器控制端点 |
+| `XDPBAN_IFACE` | — | `-iface` 的替代写法 |
 | `XDPBAN_PREFIX_DB` | — | `ip2asn-v4.tsv[.gz]` 路径;启用范围封禁 |
 | `XDPBAN_COOKIE_SECURE` | — | 位于 TLS 之后时设为任意值 |
 | `XDPBAN_PPROF` | — | 设为任意值以开放 `/debug/pprof`(务必仅绑定内网) |
+
+`xdp-sampler` 启动参数(固定 5 个,启动后不可再改 —— 采样率不支持运行时
+调整,要改就重启进程):
+
+| 参数 | 默认值 | 用途 |
+|---|---|---|
+| `-d` | `eth1` | 采样网卡(镜像口) |
+| `-n` | `100` | 采样率 1/N |
+| `-url` | `http://localhost:8080/api/v1/samples` | `xdp-ban` 上报端点 |
+| `-key` | `changeme` | 上报到 `xdp-ban` 的 API Key |
+| `-netflow` | — | NetFlow v5 collector 地址(`host:port`);为空则不导出 |
 
 ## 从源码构建
 
@@ -136,8 +159,8 @@ XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 需要 `clang` 与 `libbpf-dev`。
 
 ```bash
-make bpf      # clang → cmd/*/obj/*.o(由 go:embed 嵌入)
-make build    # 编译三个二进制;.o 缺失时直接失败
+make bpf      # clang → cmd/{xdpban,xdp-sampler}/obj/*.o(由 go:embed 嵌入)
+make build    # 编译 xdp-ban + xdp-sampler;.o 缺失时直接失败
 make check    # go vet + go test -race
 make release  # bpf + check + 交叉编译 linux/{amd64,arm64}
 ```

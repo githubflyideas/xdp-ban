@@ -2,11 +2,8 @@
 package web
 
 import (
-	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,8 +21,6 @@ type Handler struct {
 	approvals *approval.Service
 	sessions  *sessionStore
 	quota     *quota.Tracker
-	// samplerURL 是 xdp-sampler 的控制端点,用于下发采样率
-	samplerURL string
 }
 
 // sessionTTL 会话有效期,与 cookie Max-Age 保持一致
@@ -34,11 +29,10 @@ const sessionTTL = 8 * time.Hour
 func Register(r *gin.Engine, db *gorm.DB) {
 	baseURL := envOr("XDPBAN_BASE_URL", "http://localhost:8080")
 	h := &Handler{
-		db:         db,
-		approvals:  approval.NewService(db, baseURL),
-		sessions:   newSessionStore(sessionTTL),
-		quota:      quota.NewTracker(),
-		samplerURL: envOr("XDPBAN_SAMPLER_URL", "http://localhost:9090"),
+		db:        db,
+		approvals: approval.NewService(db, baseURL),
+		sessions:  newSessionStore(sessionTTL),
+		quota:     quota.NewTracker(),
 	}
 	h.restoreQuota()
 	r.SetHTMLTemplate(templates())
@@ -65,9 +59,8 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/bans/:id/reject", h.requireCap(policy.BanRequestReject), h.banReject)
 		auth.GET("/bans/:id", h.requireCap(policy.BanRequestView), h.banDetail)
 
-		// 采样管理
+		// 采样管理(只读:启动参数由 xdp-sampler 进程自己决定,见 cmd/xdp-sampler)
 		auth.GET("/sampling", h.requireCap(policy.DashboardView), h.samplingConfig)
-		auth.POST("/api/sampling/rate", h.requireCap(policy.SystemConfig), h.setSamplingRate)
 
 		// 范围封禁(按国家 / AS 选源,目标限单主机)
 		auth.GET("/scoped", h.requireCap(policy.BanRequestView), h.scopedBanList)
@@ -339,61 +332,25 @@ func (h *Handler) auditLog(c *gin.Context) {
 	})
 }
 
-// ---- 采样管理 ----
+// ---- 采样管理(只读) ----
 
-// samplingConfig 展示采样配置页:当前采样率 + 最近观测到的流量。
+// samplingConfig 展示采样配置页:当前采样器启动参数(接口/采样率/NetFlow 目标,
+// 来自最近一次上报)+ 最近观测到的流量。
+//
+// 不再提供修改入口 —— 采样率等是 xdp-sampler 的启动参数,运行期不可调整,
+// 要改就重启进程。这里纯展示,数据来源是 SampleStore 里最近一次上报,
+// 不新开一条反向查询 sampler 的路径。
 func (h *Handler) samplingConfig(c *gin.Context) {
 	u := h.currentUser(c)
+	latest, _ := SampleStore.Latest()
 	c.HTML(http.StatusOK, "sampling.html", gin.H{
 		"u": u, "nav": policy.NavSections(u.Role),
-		"canConfigure": policy.Allow(u.Role, policy.SystemConfig),
-		"canBan":       policy.Allow(u.Role, policy.BanRequestCreate),
-		"samplerURL":   h.samplerURL,
-		"currentN":     SampleStore.SamplingN(),
-		"topFlows":     SampleStore.TopFlows(5*time.Minute, 30),
+		"canBan":        policy.Allow(u.Role, policy.BanRequestCreate),
+		"device":        latest.Device,
+		"currentN":      SampleStore.SamplingN(),
+		"netflowTarget": latest.NetflowTarget,
+		"topFlows":      SampleStore.TopFlows(5*time.Minute, 30),
 	})
-}
-
-// setSamplingRate 把新的采样率转发给 xdp-sampler 的控制端点。
-//
-// xdp-ban 自己不碰 eBPF map——采样器才是那份 map 的持有者;
-// 这里只做校验、转发、审计。
-func (h *Handler) setSamplingRate(c *gin.Context) {
-	u := h.currentUser(c)
-
-	rate, err := parseRate(c.PostForm("rate"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	samplerURL := strings.TrimSpace(c.PostForm("sampler_url"))
-	if samplerURL == "" {
-		samplerURL = h.samplerURL
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.PostForm(samplerURL+"/api/sampling/rate", url.Values{
-		"rate": {strconv.Itoa(rate)},
-	})
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "无法连接采样器: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": "采样器拒绝请求: " + strings.TrimSpace(string(body)),
-		})
-		return
-	}
-
-	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "SamplingConfig", "1",
-		"rate_changed", strconv.Itoa(rate))
-
-	c.JSON(http.StatusOK, gin.H{"ok": true, "rate": rate})
 }
 
 // ---- 对外审批(唯一公网路由;部署时单独暴露 + HTTPS + 限流)----

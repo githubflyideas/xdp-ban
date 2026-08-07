@@ -1,12 +1,16 @@
 // Package main — xdp-sampler: 纯 Go 单二进制
 //
 // 职责:
-// 1. 加载嵌入的 eBPF bytecode 到采样网卡
-// 2. 管理采样率(用户态可修改 BPF map)
-// 3. 读 ringbuf 事件 → 聚合 → 上报
-// 4. 提供 HTTP API 供 xdp-ban 控制采样率
+// 1. 加载嵌入的 eBPF bytecode,attach 到采样网卡(XDP_PASS 旁路,只观测不拦截)
+// 2. 读 ringbuf 事件 → 聚合 → 上报给 xdp-ban
+// 3. 可选:把同一批聚合结果以 NetFlow v5 导出给 ElastiFlow
 //
-// 部署: 拷贝单个二进制即可运行(需 root)
+// 启动参数只有 5 个,且启动后不可再变(见下方 main 的 flag 定义):
+// 采样率是"看见即封禁"链路里的观测配置,不该在运行时被网页悄悄改掉——
+// 改动过一次采样率却没人记得,复现问题时会怀疑错方向。要改就重启,
+// systemd/进程管理器的重启记录本身就是变更记录。
+//
+// 部署: 拷贝单个二进制即可运行(需 root/CAP_NET_ADMIN,因为要 attach XDP)
 package main
 
 import (
@@ -19,11 +23,10 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 )
 
@@ -66,61 +69,36 @@ type FlowSample struct {
 	lastUptime  uint32
 }
 
-// ReportPayload 上报载荷
+// ReportPayload 上报载荷。
+//
+// Interface / NetflowTarget 是新增字段:xdp-ban 的「采样与流量」页要展示
+// 当前采样器的启动参数(只读),不新开接口去反向查询采样器 —— 复用这条
+// 已有的周期上报,把这两个字段捎带过去即可。
 type ReportPayload struct {
-	Timestamp  int64                  `json:"timestamp"`
-	Device     string                 `json:"device"`
-	SamplingN  int                    `json:"sampling_n"`
-	Flows      []FlowSample           `json:"flows"`
-	GlobalStat map[string]interface{} `json:"global_stat"`
+	Timestamp     int64                  `json:"timestamp"`
+	Device        string                 `json:"device"`
+	SamplingN     int                    `json:"sampling_n"`
+	NetflowTarget string                 `json:"netflow_target,omitempty"`
+	Flows         []FlowSample           `json:"flows"`
+	GlobalStat    map[string]interface{} `json:"global_stat"`
 }
-
-// 采样率的运行时状态。HTTP handler 与主循环并发访问,故用锁保护;
-// eBPF map 是唯一事实源,这里的副本只用于上报时标注当前比率。
-var (
-	rateMu         sync.RWMutex
-	currentRateMap *ebpf.Map
-	currentRate    = 100
-)
 
 // bootTime 采样器启动时刻。NetFlow v5 的 first/last 是相对启动的毫秒数,
 // 需要一个进程级基准。
 var bootTime = time.Now()
 
-// samplingRate 返回当前采样率 N(1/N)
-func samplingRate() int {
-	rateMu.RLock()
-	defer rateMu.RUnlock()
-	return currentRate
-}
-
-// setSamplingRate 更新 eBPF map 与本地副本
-func setSamplingRate(n int) error {
-	rateMu.Lock()
-	defer rateMu.Unlock()
-	if currentRateMap == nil {
-		return fmt.Errorf("sampling_rate map 未初始化")
-	}
-	idx := uint32(0)
-	if err := currentRateMap.Put(idx, uint32(n)); err != nil {
-		return fmt.Errorf("更新 sampling_rate map: %w", err)
-	}
-	currentRate = n
-	return nil
-}
-
 func main() {
 	device := flag.String("d", "eth1", "采样网卡")
 	xdpbanURL := flag.String("url", "http://localhost:8080/api/v1/samples", "xdp-ban 上报端点")
 	samplingN := flag.Int("n", 100, "采样率 1/N")
-	reportInterval := flag.Duration("interval", 10*time.Second, "上报间隔")
-	httpPort := flag.String("p", ":9090", "HTTP API 监听端口")
 	key := flag.String("key", "changeme", "上报到 xdp-ban 时使用的 API Key")
 	netflowAddr := flag.String("netflow", "", "NetFlow v5 collector 地址(host:port,如 elastiflow:2055);为空则不导出")
 	flag.Parse()
 	apiKey = *key
 
-	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d, http_port=%s\n", *device, *samplingN, *httpPort)
+	const reportInterval = 10 * time.Second
+
+	log.Printf("XDP 采样器启动(纯 Go 单二进制): device=%s, sampling_rate=1/%d\n", *device, *samplingN)
 
 	// NetFlow v5 导出器(可选)。启动即建 UDP 目的地绑定,失败快速退出 ——
 	// 配了 collector 却连不上,应该让用户立刻知道,而不是静默不发。
@@ -149,31 +127,39 @@ func main() {
 	}
 	defer coll.Close()
 
-	// 2. 修改采样率(运行时配置)
+	// 2. 设置采样率(启动时一次性写入,运行期不再变更)
 	rateMap := coll.Maps["sampling_rate"]
 	if rateMap == nil {
 		log.Fatalf("sampling_rate map 不存在:bytecode 与预期不符")
 	}
-	currentRateMap = rateMap
-	if err := setSamplingRate(*samplingN); err != nil {
+	idx := uint32(0)
+	if err := rateMap.Put(idx, uint32(*samplingN)); err != nil {
 		log.Fatalf("set sampling rate: %v", err)
 	}
-	log.Printf("✓ 采样率已设置: 1/%d (可通过 HTTP API 运行时修改)", *samplingN)
+	log.Printf("✓ 采样率已设置: 1/%d(启动参数,运行期不可调整)", *samplingN)
 
-	// 3. 启动 HTTP API 服务(用于 xdp-ban 控制)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/sampling/rate", handleSamplingRate)
-	srv := &http.Server{
-		Addr:              *httpPort,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	// 3. attach XDP 程序到采样网卡。这一步此前缺失 —— eBPF collection 加载
+	// 成功只代表程序在内核里"存在",不代表它在处理任何流量;没有这一步,
+	// 采样器会正常启动、正常打日志,却永远收不到一个采样事件。
+	prog := coll.Programs["xdp_sample"]
+	if prog == nil {
+		log.Fatalf("内嵌 bytecode 缺少 xdp_sample 程序 —— bytecode 与本程序版本不匹配")
 	}
-	go func() {
-		log.Printf("HTTP API 监听: %s", *httpPort)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http listen: %v", err)
-		}
-	}()
+	ifc, err := net.InterfaceByName(*device)
+	if err != nil {
+		log.Fatalf("查找网卡 %q 失败: %v", *device, err)
+	}
+	xdpLink, err := link.AttachXDP(link.XDPOptions{
+		Program:   prog,
+		Interface: ifc.Index,
+	})
+	if err != nil {
+		log.Fatalf("attach XDP 程序到 %s 失败: %v ——"+
+			"常见原因:权限不足(需 root/CAP_NET_ADMIN)、网卡不支持 XDP、"+
+			"或已有另一个 XDP 程序占用该网卡", *device, err)
+	}
+	defer xdpLink.Close()
+	log.Printf("✓ XDP 采样程序已挂载到 %s", *device)
 
 	// 4. 读 ringbuf → 上报
 	rd, err := ringbuf.NewReader(coll.Maps["samples"])
@@ -211,7 +197,7 @@ func main() {
 
 	// 流量聚合缓冲
 	flowStats := make(map[string]*FlowSample)
-	ticker := time.NewTicker(*reportInterval)
+	ticker := time.NewTicker(reportInterval)
 	defer ticker.Stop()
 
 	for {
@@ -219,11 +205,10 @@ func main() {
 		case <-ticker.C:
 			// 上报周期到
 			if len(flowStats) > 0 {
-				n := samplingRate()
-				reportSamples(*xdpbanURL, *device, n, flowStats)
+				reportSamples(*xdpbanURL, *device, *samplingN, *netflowAddr, flowStats)
 				// 同一批聚合结果同时喂给 NetFlow collector(ElastiFlow)。
 				// 复用同一张表,不为 NetFlow 单独再聚合一遍。
-				nfExporter.export(toNetflowFlows(flowStats), n)
+				nfExporter.export(toNetflowFlows(flowStats), *samplingN)
 				flowStats = make(map[string]*FlowSample) // 清空
 			}
 
@@ -301,46 +286,18 @@ func sat32(v int64) uint32 {
 	return uint32(v)
 }
 
-// handleSamplingRate HTTP API: 修改采样率
-func handleSamplingRate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	rateStr := r.FormValue("rate")
-	if rateStr == "" {
-		http.Error(w, "rate required", http.StatusBadRequest)
-		return
-	}
-
-	rate, err := strconv.Atoi(rateStr)
-	if err != nil || rate < 1 || rate > 1000000 {
-		http.Error(w, "invalid rate: 需为 1..1000000 的整数", http.StatusBadRequest)
-		return
-	}
-
-	if err := setSamplingRate(rate); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	log.Printf("✓ 采样率已更新: 1/%d", rate)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "rate": rate})
-}
-
-func reportSamples(url, device string, samplingN int, flows map[string]*FlowSample) {
+func reportSamples(url, device string, samplingN int, netflowTarget string, flows map[string]*FlowSample) {
 	flowList := make([]FlowSample, 0, len(flows))
 	for _, fs := range flows {
 		flowList = append(flowList, *fs)
 	}
 
 	payload := ReportPayload{
-		Timestamp: time.Now().Unix(),
-		Device:    device,
-		SamplingN: samplingN,
-		Flows:     flowList,
+		Timestamp:     time.Now().Unix(),
+		Device:        device,
+		SamplingN:     samplingN,
+		NetflowTarget: netflowTarget,
+		Flows:         flowList,
 		GlobalStat: map[string]any{
 			"timestamp": time.Now().Unix(),
 		},
@@ -385,7 +342,7 @@ func ipToString(ip uint32) string {
 
 // ntohs 网络字节序 uint16 转主机序
 func ntohs(v uint16) uint16 {
-	return (v>>8) | (v<<8)
+	return (v >> 8) | (v << 8)
 }
 
 func protoToString(proto uint8) string {

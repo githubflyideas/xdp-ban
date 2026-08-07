@@ -1,6 +1,11 @@
 // executor.go —— dispatch 指令 → eBPF map 写入。
 //
-// 与 main.go 分离的理由:这层要能在没有内核、没有 root 的环境里被测试。
+// 原属独立进程 cmd/xdp-agent(通过 HTTP 轮询 xdp-ban 的 /api/v1/dispatch/pending
+// 获取指令)。合并后 xdp-ban 自己持有 DB,不再需要通过 HTTP 回环调用自己 ——
+// pollAndExecute 直接查 model.Dispatch 表并调用 Apply,省掉了一整条本地
+// HTTP 往返和一份重复的鉴权。
+//
+// 与 main.go 分离的理由不变:这层要能在没有内核、没有 root 的环境里被测试。
 // 它只依赖一个抽象的 map 写入接口,而不是 *ebpf.Map。
 //
 // 这个文件的存在本身是一次事故的产物:此前 xdp_filter.c 从单级 ban_list
@@ -43,12 +48,12 @@ type banMaps struct {
 
 func newBanMaps(global, targets, src mapWriter, bootTime time.Time) *banMaps {
 	return &banMaps{
-		globalBans:  global,
-		targetHosts: targets,
-		srcBans:     src,
-		bootTime:    bootTime,
+		globalBans:   global,
+		targetHosts:  targets,
+		srcBans:      src,
+		bootTime:     bootTime,
 		nextTargetID: 1,
-		targetIDs:   make(map[string]uint32),
+		targetIDs:    make(map[string]uint32),
 	}
 }
 

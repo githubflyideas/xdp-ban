@@ -30,23 +30,24 @@ sudo ./xdp-sampler \
 采样率(`-n`)会写入 NetFlow 报文的 sampling_interval 字段,ElastiFlow
 据此把采样计数乘以 N 还原真实流量,不需要在 ElastiFlow 侧再配一遍。
 
-## 一键起 ElastiFlow(Docker 或 Podman)
+## 一键起 ElastiFlow(Docker)
 
-`deploy/elastiflow/` 下的 compose 文件兼容 Docker Compose v2 与 Podman Compose:
+`deploy/elastiflow/` 下的 compose 文件是标准 Docker Compose v2 格式:
 
 ```bash
 cd deploy/elastiflow
-
-# Docker
 docker compose up -d
-
-# Podman(需安装 podman-compose)
-podman-compose up -d
 
 # 首次启动 Elasticsearch 需要一两分钟,就绪后:
 #   Kibana:      http://localhost:5601
 #   NetFlow 入口: udp/2055
 ```
+
+不需要 root:三个容器(elasticsearch/kibana/flow-collector)都是普通用户态
+服务,不需要 `--privileged`、不需要 host 网络、不需要 `sudo docker compose`。
+真正需要 root 的是宿主机上的 `xdp-sampler` 进程 —— 它要把 XDP 程序 attach
+到网卡,这是内核操作,容器管不到,所以 `sudo ./xdp-sampler ...` 跟这个
+compose 栈是两件独立的事。
 
 然后让 sampler 指向宿主机的 2055 端口即可。Kibana 里导入 ElastiFlow
 官方 dashboard(compose 已挂载 setup 容器自动导入)后,就能看到按

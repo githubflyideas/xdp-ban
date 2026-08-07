@@ -1,6 +1,5 @@
 # 构建产物
 /xdp-ban
-/xdp-agent
 /xdp-sampler
 /dist/
 *.exe
@@ -11,9 +10,9 @@ coverage.out
 coverage.html
 
 # 编译出的 eBPF 目标(由 `make bpf` 生成;仓库保留占位空文件供无 clang 环境编译)
-cmd/xdp-agent/obj/*.o
+cmd/xdpban/obj/*.o
 cmd/xdp-sampler/obj/*.o
-!cmd/xdp-agent/obj/.gitkeep
+!cmd/xdpban/obj/.gitkeep
 !cmd/xdp-sampler/obj/.gitkeep
 
 # 依赖

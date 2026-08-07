@@ -1,22 +1,21 @@
-# ElastiFlow 流量分析栈
+# ElastiFlow 流量分析栈(Docker Compose v2)
 #
 # 一键拉起 Elasticsearch + Kibana + ElastiFlow flow-collector。
 # 只接收 xdp-sampler 通过 NetFlow v5 推送的采样流量,不替代 xdp-ban 本身。
 #
-# 兼容 Docker Compose v2 与 Podman Compose:
-#   docker compose up -d        (Docker)
-#   podman-compose up -d        (Podman,需 podman-compose)
-#   podman play kube ...        (Podman Kubernetes 模式,见下方说明)
+# 启动:
+#   cd deploy/elastiflow
+#   docker compose up -d
 #
-# Podman 用户注意事项:
-#   1. Podman 默认不启动 rootless 的 keep-alive 进程,网络可能在登出后消失。
-#      建议用 systemd 管理:podman generate systemd --new --files --name ef-elasticsearch
-#   2. bootstrap.memory_lock=true 在 rootless Podman 下可能无效,
-#      可安全设为 false(性能稍降,评估环境无所谓)。
-#   3. 端口 udp/2055 需要数字大于 1024,Podman rootless 已满足。
+# 停止(保留数据): docker compose down
+# 完全清除:       docker compose down -v
 #
-# 停止(保留数据): docker/podman compose down
-# 完全清除:       docker/podman compose down -v
+# 是否需要 root / 特权容器:不需要。
+#   这三个容器(elasticsearch/kibana/flow-collector)都是普通用户态服务,
+#   不碰网卡、不需要 CAP_NET_ADMIN、不需要 --privileged 或 host 网络模式。
+#   root 权限只有 xdp-sampler(本机进程,不在这个 compose 里)才需要 ——
+#   它要 attach XDP 程序到网卡,这是内核操作,Docker 容器管不到。
+#   一句话:docker compose 这边全程普通用户跑,sudo 留给 `sudo ./xdp-sampler`。
 #
 # 就绪后:
 #   Kibana       http://localhost:5601
@@ -40,7 +39,8 @@ services:
       - cluster.name=xdpban-ef
     ulimits:
       # memlock 必须解锁,否则 bootstrap.memory_lock=true 启动失败。
-      # 这是 ES 在容器里最常见的启动错误。
+      # 这是 ES 在容器里最常见的启动错误。Docker 默认按 ulimits 里给的值
+      # 设置,不需要额外传 --privileged 或修改宿主机 limits.conf。
       memlock:
         soft: -1
         hard: -1

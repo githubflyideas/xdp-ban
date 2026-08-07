@@ -134,27 +134,14 @@ const auditTpl = `<!doctype html><html><head><meta charset="utf-8"><title>审计
 const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采样与流量 · xdp-ban</title>{{template "_head"}}</head>
 <body>` + navTpl + `<h1>采样与实时流量</h1>
 
-<div class="card" style="max-width:520px"><div class="hd">采样率</div><div class="bd">
-<p style="color:#67748a;margin-top:0;font-size:14px">当前 <strong>1/{{.currentN}}</strong> 包采样。值越小采样越密集,CPU 与上报带宽开销相应增加。</p>
-{{if .canConfigure}}
-<form id="samplingForm">
-<label>采样比率 (1/N) — 步长 2x</label>
-<select id="samplingRate" name="rate">
-  {{$cur := .currentN}}
-  <option value="1024"  {{if eq $cur 1024 }}selected{{end}}>1 / 1,024</option>
-  <option value="2048"  {{if eq $cur 2048 }}selected{{end}}>1 / 2,048</option>
-  <option value="4096"  {{if eq $cur 4096 }}selected{{end}}>1 / 4,096</option>
-  <option value="8192"  {{if eq $cur 8192 }}selected{{end}}>1 / 8,192</option>
-  <option value="16384" {{if eq $cur 16384}}selected{{end}}>1 / 16,384</option>
-  <option value="32768" {{if eq $cur 32768}}selected{{end}}>1 / 32,768</option>
-  <option value="65536" {{if eq $cur 65536}}selected{{end}}>1 / 65,536</option>
-</select>
-<label style="margin-top:14px">采样器地址</label>
-<input type="text" id="samplerURL" name="sampler_url" value="{{.samplerURL}}">
-<div style="margin-top:18px"><button class="btn primary" type="button" onclick="setSamplingRate()">立即应用</button></div>
-</form>
-<div id="result" style="margin-top:14px"></div>
-{{else}}<p style="color:#98a2b3">你的角色只能查看,调整采样率需要系统配置权限。</p>{{end}}
+<div class="card" style="max-width:520px"><div class="hd">当前采样器配置(只读)</div><div class="bd">
+<p style="color:#67748a;margin-top:0;font-size:14px">采样率、接口、NetFlow 目标是 xdp-sampler 的启动参数,运行期不可在此修改 ——
+要调整需在采样器所在主机改命令行参数并重启进程。以下数据来自采样器最近一次上报。</p>
+<table>
+<tr><td style="color:#67748a">采集接口</td><td class="mono">{{if .device}}{{.device}}{{else}}(暂无上报){{end}}</td></tr>
+<tr><td style="color:#67748a">采样率</td><td class="mono">{{if .currentN}}1 / {{.currentN}}{{else}}(暂无上报){{end}}</td></tr>
+<tr><td style="color:#67748a">NetFlow 导出目标</td><td class="mono">{{if .netflowTarget}}{{.netflowTarget}}{{else}}未启用{{end}}</td></tr>
+</table>
 </div></div>
 
 <div class="card"><div class="hd">近 5 分钟 Top 30 流量(采样观测)</div><div class="bd">
@@ -173,30 +160,6 @@ const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采
 {{else}}<tr><td colspan="6" style="color:#98a2b3">暂无采样数据。确认 xdp-sampler 正在运行并上报到本机 /api/v1/samples。</td></tr>
 {{end}}</tbody></table>
 </div></div>
-
-<script>
-function setSamplingRate() {
-  const rate = document.getElementById('samplingRate').value;
-  const samplerURL = document.getElementById('samplerURL').value;
-  const resultDiv = document.getElementById('result');
-  fetch('/api/sampling/rate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: 'rate=' + encodeURIComponent(rate) + '&sampler_url=' + encodeURIComponent(samplerURL)
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (data.ok) {
-      resultDiv.innerHTML = '<div class="flash" style="background:#e8f5e9;border:1px solid #c8e6c9;color:#2e7d32">✓ 采样率已更新: 1/' + rate + '</div>';
-    } else {
-      resultDiv.innerHTML = '<div class="flash err">' + data.error + '</div>';
-    }
-  })
-  .catch(e => {
-    resultDiv.innerHTML = '<div class="flash err">错误: ' + e.message + '</div>';
-  });
-}
-</script>
 </main></div></body></html>`
 
 const errTpl = `<!doctype html><html><head><meta charset="utf-8"><title>xdp-ban</title>{{template "_head"}}</head>

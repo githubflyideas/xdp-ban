@@ -86,14 +86,3 @@ func TestSampleEventSize(t *testing.T) {
 	}
 }
 
-// 采样率是并发读写的:HTTP handler 改、上报循环读。
-func TestSamplingRate_ConcurrentAccess(t *testing.T) {
-	// currentRateMap 为 nil 时 setSamplingRate 应报错而非 panic
-	if err := setSamplingRate(50); err == nil {
-		t.Error("map 未初始化时 setSamplingRate 应返回错误")
-	}
-	// 读路径在任何情况下都不应 panic
-	if n := samplingRate(); n < 1 {
-		t.Errorf("samplingRate() = %d, 应有合法默认值", n)
-	}
-}

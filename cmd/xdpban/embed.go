@@ -12,5 +12,7 @@ import _ "embed"
 // 避免产出内嵌空 bytecode 的二进制(那种二进制启动即报错,
 // 但错误发生在客户机器上而不是构建时)。
 //
+// 这个文件原属 cmd/xdp-agent(独立执行器进程),合并进 xdp-ban 后随之搬入。
+//
 //go:embed obj/xdp_filter.o
 var xdpFilterBytecode []byte

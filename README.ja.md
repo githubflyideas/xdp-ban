@@ -32,23 +32,29 @@ eBPF でミラートラフィックをサンプリングし、ホストに何が
 
 ## 構成
 
-3 つのバイナリ、それぞれ独立してデプロイ可能:
+2 つのバイナリ、それぞれ独立してデプロイ可能:
 
 | バイナリ | 役割 | root 必須 |
 |---|---|---|
-| `xdp-ban` | コントロールプレーン:Web UI、承認、SQLite | 不要 |
-| `xdp-agent` | エンフォースメント:指示をポーリングし XDP マップを書く | 必要 |
+| `xdp-ban` | コントロールプレーン + エンフォースメント:Web UI、承認、SQLite、XDP マップを書く | 必要 |
 | `xdp-sampler` | 観測:ミラーポートで 1/N サンプリングしフローを報告 | 必要 |
 
 サンプリングは**アウトオブバンド**です。トラフィックの複製を観測し、常に `XDP_PASS` を返します。
+
+`xdp-ban` は以前、コントロールプレーンと独立した `xdp-agent` エンフォーサーに
+分かれていました(後者はコントロールプレーン自身の HTTP API をポーリングして
+指示を取得)。両者は統合され、`xdp-ban` 自身が XDP 遮断プログラムをロード・
+アタッチし、承認済みの遮断をデータベースに対して直接実行します(ローカル
+HTTP のラウンドトリップなし)。どのインターフェースにアタッチするかは
+`-iface <ifname>`(業務用 NIC、ミラーポートではない)で指定します。
 
 ## クイックスタート
 
 ```bash
 make bpf     # eBPF オブジェクトをコンパイル(clang 必須)
-make build   # 3 つのバイナリをビルド
+make build   # xdp-ban + xdp-sampler をビルド
 
-./xdp-ban    # http://localhost:8080  (既定 admin / admin12345 — 必ず変更)
+sudo ./xdp-ban -iface eth0    # http://localhost:8080  (既定 admin / admin12345 — 必ず変更)
 ```
 
 データは単一の `xdpban.db` ファイルに保存。バックアップはファイルをコピーするだけ。
@@ -57,7 +63,6 @@ make build   # 3 つのバイナリをビルド
 
 ```bash
 sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples -n 100 -key <API_KEY>
-sudo ./xdp-agent   -server http://<control>:8080 -key <API_KEY>
 ```
 
 ## 範囲ブロック(国 / AS)
@@ -77,8 +82,8 @@ XDPBAN_PREFIX_DB=./ip2asn-v4.tsv.gz ./xdp-ban
 ## ソースからビルド
 
 ```bash
-make bpf      # clang → cmd/*/obj/*.o、go:embed で埋め込み
-make build    # 3 つの静的バイナリ
+make bpf      # clang → cmd/{xdpban,xdp-sampler}/obj/*.o、go:embed で埋め込み
+make build    # xdp-ban + xdp-sampler
 make check    # go vet + go test -race
 make dist     # linux/{amd64,arm64} のクロスコンパイル + SHA256SUMS
 ```

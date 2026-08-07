@@ -9,7 +9,7 @@
 #   sudo ./scripts/xdp-bench.sh --iface eth0 --duration 30
 #   sudo ./scripts/xdp-bench.sh --iface eth0 --map-only     # 只测 map 操作
 #
-# 前置:make bpf && make build,且 xdp-agent 已挂载程序到 --iface
+# 前置:make bpf && make build,且 xdp-ban 已通过 -iface 挂载 XDP 封禁程序
 set -euo pipefail
 
 IFACE=""

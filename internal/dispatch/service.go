@@ -26,7 +26,7 @@ func NewService(db *gorm.DB, guard *safety.Guard) *Service {
 
 // BanPayload 下发的物理封禁指令。
 //
-// 字段组合决定 agent 走哪条执行路径,必须与 cmd/xdp-agent/main.go 的
+// 字段组合决定 agent 走哪条执行路径,必须与 cmd/xdpban/exec_loop.go 的
 // BanPayload 保持一致 —— 这是跨进程的 JSON 契约:
 //   - Target 有值、ScopedTarget 为空 → 写 src_ban_global(封该源,不限目标)
 //   - ScopedTarget + Prefixes 有值   → 写 target_hosts + src_ban(定向封禁)

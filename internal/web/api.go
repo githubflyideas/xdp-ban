@@ -120,13 +120,18 @@ type FlowSample struct {
 	LastSeen  int64  `json:"last_seen_unix"`
 }
 
-// SampleReport 一次上报的完整载荷
+// SampleReport 一次上报的完整载荷。
+//
+// NetflowTarget 是新增字段:xdp-sampler 把自己的启动参数(接口/采样率/
+// NetFlow 目标)捎带在周期上报里,xdp-ban 的「采样与流量」页借此展示
+// 当前采样器配置(只读),不需要为此新开一条反向查询接口。
 type SampleReport struct {
-	Timestamp  int64          `json:"timestamp"`
-	Device     string         `json:"device"`
-	SamplingN  int            `json:"sampling_n"`
-	Flows      []FlowSample   `json:"flows"`
-	GlobalStat map[string]any `json:"global_stat"`
+	Timestamp     int64          `json:"timestamp"`
+	Device        string         `json:"device"`
+	SamplingN     int            `json:"sampling_n"`
+	NetflowTarget string         `json:"netflow_target,omitempty"`
+	Flows         []FlowSample   `json:"flows"`
+	GlobalStat    map[string]any `json:"global_stat"`
 }
 
 // receiveSamples 接收采样上报,写入内存环形缓冲供仪表板读取。

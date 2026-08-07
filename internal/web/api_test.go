@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -160,43 +159,5 @@ func TestReceiveSamples_StoresAndAggregates(t *testing.T) {
 	// 按包数降序:最吵的排第一
 	if top[0].SrcIP != "203.0.113.6" {
 		t.Errorf("首位来源 = %s, 期望 203.0.113.6(包数最多)", top[0].SrcIP)
-	}
-}
-
-// 采样率必须在服务端校验,不能只靠前端 input 的 min/max。
-func TestSetSamplingRate_ValidatesInput(t *testing.T) {
-	for _, raw := range []string{"0", "-5", "abc", "", "99999999"} {
-		if _, err := parseRate(raw); err == nil {
-			t.Errorf("采样率 %q 应被拒绝", raw)
-		}
-	}
-	for _, raw := range []string{"1", "100", "1000000"} {
-		if _, err := parseRate(raw); err != nil {
-			t.Errorf("采样率 %q 应被接受: %v", raw, err)
-		}
-	}
-}
-
-// 确认转发到采样器的请求形状正确(表单字段 rate)
-func TestSetSamplingRate_ForwardsToSampler(t *testing.T) {
-	var gotRate string
-	sampler := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sampling/rate" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		gotRate = r.FormValue("rate")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer sampler.Close()
-
-	resp, err := http.PostForm(sampler.URL+"/api/sampling/rate", url.Values{"rate": {"250"}})
-	if err != nil {
-		t.Fatalf("转发失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if gotRate != "250" {
-		t.Errorf("采样器收到 rate=%q, 期望 250", gotRate)
 	}
 }
