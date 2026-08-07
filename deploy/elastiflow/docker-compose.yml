@@ -22,15 +22,16 @@
 #   NetFlow 入口 udp/2055  ← xdp-sampler -netflow <本机IP>:2055
 #
 # 注:早期用了顶层 name: 字段给项目命名,但那是 Compose 规范新增、
-# 注:顶层 version 字段是给老的 docker-compose v1 用的 —— 没有它,v1 会
-# 退回最古老的 "v1 文件格式"(整个文件即服务列表,没有 services/volumes
-# 这层),于是把 services、volumes 当成服务名而报 "Unsupported config
-# option"。这里用 2.4 而不是 3.x:本栈依赖 depends_on 的
-# condition: service_healthy(等 ES 健康再起 collector),这个长格式只在
-# 2.x 文件格式里支持,v3 把它丢掉了。2.4 同时被 docker-compose v1 与
-# Docker Compose v2 接受(v2 会有一句 version obsolete 提示,无害)。
-# 不要用顶层 name: 字段,那是 v2 专属,v1 不认。
-version: "2.4"
+# 注:顶层 version 字段必不可少 —— 缺了它,docker-compose v1 会退回最古老的
+# "v1 文件格式"(整个文件即服务列表,无 services/volumes 层),把 kibana、
+# es-data 当成未知配置项报 "Unsupported config option"。
+# 用 2.1 而非 2.4 或 3.x:
+#   - 2.4 需要 docker-compose >= 1.21(2018),太新,老版本不认会回退报错;
+#   - 3.x 移除了 depends_on 的 condition: service_healthy 长格式(我们要靠它
+#     等 ES 健康再起 collector);
+#   - 2.1 自 docker-compose 1.9(2016)起支持,同时具备 healthcheck +
+#     condition: service_healthy,是兼容面最广的选择。
+version: "2.1"
 
 services:
   elasticsearch:
