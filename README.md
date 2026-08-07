@@ -54,23 +54,42 @@ Download the binary and run it. No dependencies, no build step — the eBPF obje
 
 ```bash
 # x86_64
-curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-ban-linux-amd64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-ban-linux-amd64
 # arm64: replace amd64 with arm64 in the URL above
 
 chmod +x xdp-ban
-./xdp-ban    # http://localhost:8080  (default admin / admin12345 — change it)
+./xdp-ban    # http://localhost:8080
 ```
+
+### Default accounts
+
+Four accounts are seeded on first run, one per role. **Change these passwords
+immediately** — they are printed in this README and therefore public.
+
+| Username | Password | Role | Can do |
+|---|---|---|---|
+| `admin` | `admin12345` | admin | everything, incl. user management and system config |
+| `approver` | `approver12345` | approver | approve / reject / revoke bans, view audit |
+| `operator` | `operator12345` | operator | submit ban requests, view audit |
+| `viewer` | `viewer12345` | viewer | read-only |
+
+Why four and not one: the **four-eyes principle** requires the submitter and the
+approver to be different people. A single account cannot approve its own request,
+so you need at least two usable logins to complete a ban.
+
+Change passwords under **用户管理 / Users** (admin only). You can also add, disable
+and delete users there — every change is written to the audit log.
 
 Data lives in a single `xdpban.db` file. Back up = copy the file.
 
 Data plane (root, on the hosts doing the work) — same download pattern for `xdp-sampler` and `xdp-agent`:
 
 ```bash
-curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-agent-linux-amd64
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-agent-linux-amd64
 chmod +x xdp-sampler xdp-agent
 
-sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples -n 100 -key <API_KEY>
+sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples -n 4096 -key <API_KEY>
 sudo ./xdp-agent   -server http://<control>:8080 -key <API_KEY>
 ```
 
@@ -83,7 +102,7 @@ visualization, alongside its report to xdp-ban. Add `-netflow <collector>:2055`:
 
 ```bash
 sudo ./xdp-sampler -d eth1 -url http://<control>:8080/api/v1/samples \
-     -n 100 -key <API_KEY> -netflow 127.0.0.1:2055
+     -n 4096 -key <API_KEY> -netflow 127.0.0.1:2055
 ```
 
 A ready-to-run stack (Elasticsearch + Kibana + ElastiFlow) lives in

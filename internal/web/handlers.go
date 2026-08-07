@@ -79,9 +79,14 @@ func Register(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/scoped/:id/reject", h.requireCap(policy.BanRequestReject), h.scopedBanReject)
 		auth.POST("/scoped/:id/revoke", h.requireCap(policy.UnbanExecute), h.scopedBanRevoke)
 
-		// 用户管理(admin only)
+		// 用户管理(admin only)。用户是治理体系的主体 ——
+		// 谁能提交、谁能审批全靠这张表,所以每个动作都记审计。
 		auth.GET("/users", h.requireCap(policy.UserManage), h.usersList)
+		auth.POST("/users", h.requireCap(policy.UserManage), h.userCreate)
 		auth.POST("/users/:id/password", h.requireCap(policy.UserManage), h.userChangePassword)
+		auth.POST("/users/:id/role", h.requireCap(policy.UserManage), h.userChangeRole)
+		auth.POST("/users/:id/toggle", h.requireCap(policy.UserManage), h.userToggleActive)
+		auth.POST("/users/:id/delete", h.requireCap(policy.UserManage), h.userDelete)
 
 		// IP 前缀库管理(在线同步 / 离线上传 / 本地覆盖规则)
 		auth.GET("/prefixdb", h.requireCap(policy.SystemConfig), h.prefixDBPage)
@@ -321,34 +326,8 @@ func (h *Handler) banDetail(c *gin.Context) {
 }
 
 // ---- 用户管理 ----
-func (h *Handler) usersList(c *gin.Context) {
-	u := h.currentUser(c)
-	var users []model.User
-	h.db.Find(&users)
-	c.HTML(http.StatusOK, "users.html", gin.H{
-		"u": u, "nav": policy.NavSections(u.Role), "users": users,
-	})
-}
-
-func (h *Handler) userChangePassword(c *gin.Context) {
-	u := h.currentUser(c)
-	var target model.User
-	if h.db.First(&target, c.Param("id")).Error != nil {
-		c.HTML(http.StatusNotFound, "error.html", gin.H{"msg": "用户不存在"})
-		return
-	}
-	newPwd := c.PostForm("password")
-	if newPwd == "" {
-		c.HTML(http.StatusBadRequest, "error.html", gin.H{"msg": "密码不能为空"})
-		return
-	}
-	_ = target.SetPassword(newPwd)
-	h.db.Model(&target).Update("password_hash", target.PasswordHash)
-	// 改密必须吊销该用户已有会话,否则旧 cookie 仍然畅通
-	h.sessions.DeleteByUser(target.ID)
-	_ = model.WriteAudit(h.db, &u.ID, u.Label(), "User", itoa(target.ID), "password_changed", "")
-	c.Redirect(http.StatusFound, "/users")
-}
+// 实现见 users.go —— 拆出去是因为增删改角色加约束校验后
+// 这块逻辑已经比 handlers.go 里其他 handler 都重。
 
 // ---- 审计日志 ----
 func (h *Handler) auditLog(c *gin.Context) {
@@ -371,7 +350,7 @@ func (h *Handler) samplingConfig(c *gin.Context) {
 		"canBan":       policy.Allow(u.Role, policy.BanRequestCreate),
 		"samplerURL":   h.samplerURL,
 		"currentN":     SampleStore.SamplingN(),
-		"topFlows":     SampleStore.TopFlows(5*time.Minute, 200),
+		"topFlows":     SampleStore.TopFlows(5*time.Minute, 30),
 	})
 }
 

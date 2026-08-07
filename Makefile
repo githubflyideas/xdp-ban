@@ -1,4 +1,4 @@
-VERSION ?= v0.27
+VERSION ?= v0.28
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 CLANG   ?= clang

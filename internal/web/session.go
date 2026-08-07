@@ -80,6 +80,24 @@ func (s *sessionStore) DeleteByUser(userID uint) {
 	}
 }
 
+// OnlineUsers 返回当前持有有效会话的 userID 集合。
+//
+// 用于界面区分"账号启用"与"当前在线" —— 这两件事此前被混为一谈,
+// 导致所有启用的账号都被标成在线,而实际上可能只有一个人登录。
+func (s *sessionStore) OnlineUsers() map[uint]bool {
+	now := time.Now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[uint]bool, len(s.data))
+	for _, e := range s.data {
+		if now.Before(e.expiresAt) {
+			out[e.userID] = true
+		}
+	}
+	return out
+}
+
 // reaper 定期清理过期会话,避免长期运行后 map 无界增长。
 // 只有被访问过的会话才会在 Get 里被顺带清理,没人再碰的僵尸会话得靠这里。
 func (s *sessionStore) reaper() {

@@ -123,15 +123,6 @@ const banDetailTpl = `<!doctype html><html><head><meta charset="utf-8"><title>�
 </div></div>{{end}}
 </main></div></body></html>`
 
-const usersTpl = `<!doctype html><html><head><meta charset="utf-8"><title>用户管理 · xdp-ban</title>{{template "_head"}}</head>
-<body>` + navTpl + `<h1>用户管理</h1>
-<div class="card"><table><thead><tr><th>用户名</th><th>邮箱</th><th>角色</th><th>状态</th><th>最后登录</th></tr></thead><tbody>
-{{range .users}}<tr><td>{{.Username}}</td><td>{{.Email}}</td><td>{{.Role}}</td>
-<td>{{if .Active}}<span class="st ok">在线</span>{{else}}<span class="st mut">停用</span>{{end}}</td>
-<td>{{if .LastLoginAt}}{{.LastLoginAt.Format "01-02 15:04"}}{{else}}-{{end}}</td></tr>
-{{end}}</tbody></table></div>
-</main></div></body></html>`
-
 const auditTpl = `<!doctype html><html><head><meta charset="utf-8"><title>审计 · xdp-ban</title>{{template "_head"}}</head>
 <body>` + navTpl + `<h1>审计日志</h1>
 <div class="card"><table><thead><tr><th>时间</th><th>用户</th><th>实体</th><th>事件</th></tr></thead><tbody>
@@ -166,8 +157,9 @@ const samplingTpl = `<!doctype html><html><head><meta charset="utf-8"><title>采
 {{else}}<p style="color:#98a2b3">你的角色只能查看,调整采样率需要系统配置权限。</p>{{end}}
 </div></div>
 
-<div class="card"><div class="hd">近 5 分钟 Top 流量(采样观测,最多 200 条)</div><div class="bd">
-<p style="color:#67748a;margin-top:0;font-size:14px">最吵的源在最上面。看到异常源,直接点「封禁此源」发起治理流程 —— 目标已按流量方向预填。</p>
+<div class="card"><div class="hd">近 5 分钟 Top 30 流量(采样观测)</div><div class="bd">
+<p style="color:#67748a;margin-top:0;font-size:14px">最吵的源在最上面。看到异常源,直接点「封禁此源」发起治理流程 —— 目标已按流量方向预填。
+需要历史趋势、按国家/AS 的多维分析,请用 ElastiFlow(见 <span class="mono">deploy/elastiflow/</span>)。</p>
 <table><thead><tr><th>源地址</th><th>目标</th><th>协议</th><th>采样包数</th><th>采样字节</th><th></th></tr></thead><tbody>
 {{range .topFlows}}<tr>
 <td class="mono">{{.SrcIP}}{{if .SrcPort}}:{{.SrcPort}}{{end}}</td>

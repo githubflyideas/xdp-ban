@@ -54,23 +54,40 @@ eBPF 流量采样 + 治理式封禁 —— 拷贝二进制即可运行。
 
 ```bash
 # x86_64
-curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-ban-linux-amd64
+curl -L -o xdp-ban https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-ban-linux-amd64
 # arm64:把上面 URL 里的 amd64 换成 arm64
 
 chmod +x xdp-ban
-./xdp-ban    # http://localhost:8080  (默认 admin / admin12345,请立即修改)
+./xdp-ban    # http://localhost:8080
 ```
+
+### 默认账号
+
+首次启动会按角色各建一个账号。**这些密码写在公开的 README 里,请立即修改。**
+
+| 用户名 | 密码 | 角色 | 能做什么 |
+|---|---|---|---|
+| `admin` | `admin12345` | admin | 全部权限,含用户管理与系统配置 |
+| `approver` | `approver12345` | approver | 审批 / 驳回 / 撤销封禁,查看审计 |
+| `operator` | `operator12345` | operator | 提交封禁请求,查看审计 |
+| `viewer` | `viewer12345` | viewer | 只读 |
+
+为什么是四个而不是一个:**四眼原则**要求提交人与审批人不是同一个人。
+一个账号无法审批自己提交的请求,所以至少需要两个可用登录才能完成一次封禁。
+
+在 **用户管理** 页面(仅 admin)可改密码、新增、停用、删除用户 ——
+每次变更都写入审计日志。
 
 数据存于单个 `xdpban.db` 文件,备份就是拷贝这个文件。
 
 数据面(在实际干活的主机上,需 root)—— `xdp-sampler` 和 `xdp-agent` 同样方式下载:
 
 ```bash
-curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-sampler-linux-amd64
-curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.27/xdp-agent-linux-amd64
+curl -L -o xdp-sampler https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-sampler-linux-amd64
+curl -L -o xdp-agent   https://github.com/githubflyideas/xdp-ban/releases/download/v0.28/xdp-agent-linux-amd64
 chmod +x xdp-sampler xdp-agent
 
-sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 100 -key <API_KEY>
+sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples -n 4096 -key <API_KEY>
 sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 ```
 
@@ -83,7 +100,7 @@ sudo ./xdp-agent   -server http://<控制面>:8080 -key <API_KEY>
 
 ```bash
 sudo ./xdp-sampler -d eth1 -url http://<控制面>:8080/api/v1/samples \
-     -n 100 -key <API_KEY> -netflow 127.0.0.1:2055
+     -n 4096 -key <API_KEY> -netflow 127.0.0.1:2055
 ```
 
 [`deploy/elastiflow/`](deploy/elastiflow/) 下有一键 compose(Elasticsearch + Kibana
