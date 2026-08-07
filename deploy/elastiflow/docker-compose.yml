@@ -20,8 +20,12 @@
 # 就绪后:
 #   Kibana       http://localhost:5601
 #   NetFlow 入口 udp/2055  ← xdp-sampler -netflow <本机IP>:2055
-
-name: xdpban-elastiflow
+#
+# 注:早期用了顶层 name: 字段给项目命名,但那是 Compose 规范新增、
+# 只有 Docker Compose v2(docker compose ...)才认的写法。老的
+# docker-compose(v1,Python 版)会把它当成一个叫 name 的服务而报错
+# "service 'name' must be a mapping not a string"。项目名可有可无,
+# 这里去掉以兼容 v1;需要指定项目名用 `docker compose -p xdpban-elastiflow up -d`。
 
 services:
   elasticsearch:
